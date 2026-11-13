@@ -241,18 +241,16 @@
     }
     for (const g of groups) {
       const pid = String((g && g.providerId) || "");
-      menuEl.appendChild(menuItem("zenhance-menu-group",
-        String((g && g.name) || pid || "未命名供应商")));
+      const gname = String((g && g.name) || pid || "未命名供应商");
       const models = (g && g.models) || [];
-      if (!models.length) {
-        menuEl.appendChild(menuItem("zenhance-menu-empty", "（该供应商没有可用模型）"));
-        continue;
-      }
+      if (!models.length) continue;   // 空组整组隐藏（handler 侧已过滤，此为防御）
+      menuEl.appendChild(menuItem("zenhance-menu-group", gname));
       for (const m of models) {
         const mid = String((m && m.id) || "");
         const active = !!(cur && cur.providerId === pid && cur.modelId === mid);
+        const label = String((m && m.name) || mid) + (m && m.dup ? "（" + gname + "）" : "");
         const it = menuItem("zenhance-menu-item",
-          (active ? "✓ " : "") + String((m && m.name) || mid));
+          (active ? "✓ " : "") + label);
         it.setAttribute("data-provider", pid);
         it.setAttribute("data-model", mid);
         it.setAttribute("title", pid + "/" + mid);

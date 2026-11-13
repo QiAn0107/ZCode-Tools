@@ -483,6 +483,86 @@ class TestListModelsMode(EnhanceHandlerTestBase):
         self.assertTrue(r.get("success"), f"空输入框也应能列出模型: {r}")
 
 
+class TestListModelsCompleteness(EnhanceHandlerTestBase):
+    """`{list:true}` 清单完整性（0.6.25）：菜单必须与设置页实际一致。
+
+    回归的三类真实缺口（见脱敏诊断）：
+      ① config.json 独有模型被 pid 级丢弃（合并改为模型级）；
+      ② 空模型组渲染"没有可用模型"占位（改为整组隐藏）；
+      ③ 跨供应商重名模型无法区分（打 dup 标记，渲染层追加供应商后缀）。
+    外加 systemDisabledReason 在权威源漏拷的过滤回归。
+    """
+
+    PROVIDER_B = "prov-b-0003"
+    PROVIDER_EMPTY = "prov-empty-0004"
+    PROVIDER_DISABLED = "prov-disabled-0005"
+
+    def setUp(self):
+        super().setUp()
+        # 权威源追加：B 供应商（与 config.json 同 pid）、空模型供应商、禁用供应商
+        pcp = self.root / "provider_config.json"
+        cfg = json.loads(pcp.read_text(encoding="utf-8"))
+        rules = cfg["config"]["providerConfigRules"]["providerRules"]
+        rules.append(
+            {"providerId": self.PROVIDER_B, "providerName": "B供应商",
+             "config": {"access": {"apiKey": "sk-test-b"},
+                        "api": {"baseUrl": self.base_url, "type": "openai-compatible"},
+                        "personalModelIds": ["shared-model", "only-b"]}})
+        rules.append(
+            {"providerId": self.PROVIDER_EMPTY, "providerName": "空供应商",
+             "config": {"access": {"apiKey": "sk-test-e"},
+                        "api": {"baseUrl": self.base_url, "type": "openai-compatible"},
+                        "personalModelIds": []}})
+        rules.append(
+            {"providerId": self.PROVIDER_DISABLED, "providerName": "禁用供应商",
+             "config": {"access": {"apiKey": "sk-test-d"},
+                        "api": {"baseUrl": self.base_url, "type": "openai-compatible"},
+                        "systemDisabledReason": "plan_not_entitled",
+                        "personalModelIds": ["model-x"]}})
+        # prov-ok 也放一个 shared-model，制造跨供应商重名
+        rules[0]["config"]["personalModelIds"].append("shared-model")
+        pcp.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+        # 旧格式 config.json：B 供应商独有模型 only-cfg（权威表里没有）
+        (self.root / "config.json").write_text(json.dumps({
+            "provider": {
+                self.PROVIDER_B: {
+                    "name": "B供应商",
+                    "options": {"baseURL": self.base_url, "apiKey": "sk-test-b"},
+                    "models": {"only-b": {}, "only-cfg": {"name": "Only Cfg"}}},
+            }}, ensure_ascii=False), encoding="utf-8")
+        self.remove_hot()
+
+    def _groups(self):
+        r = self.h.run(list_only=True)
+        self.assertTrue(r.get("success"), f"应成功: {r}")
+        self.assert_request_count(0)
+        return {g["providerId"]: g for g in r.get("groups") or []}
+
+    def test_config_only_models_are_merged(self):
+        """config.json 独有模型必须并入同 pid 分组（模型级合并）。"""
+        g = self._groups()[self.PROVIDER_B]
+        ids = sorted(m["id"] for m in g["models"])
+        self.assertEqual(ids, ["only-b", "only-cfg", "shared-model"])
+
+    def test_empty_group_is_hidden(self):
+        """空模型组整组不出现（不再渲染占位文案）。"""
+        self.assertNotIn(self.PROVIDER_EMPTY, self._groups())
+
+    def test_duplicate_models_are_marked(self):
+        """跨供应商重名模型打 dup 标记，非重名不打。"""
+        groups = self._groups()
+        ga = [m for m in groups[self.PROVIDER_OK]["models"] if m["id"] == "shared-model"][0]
+        gb = [m for m in groups[self.PROVIDER_B]["models"] if m["id"] == "shared-model"][0]
+        self.assertTrue(ga.get("dup"), "重名模型应打 dup 标记")
+        self.assertTrue(gb.get("dup"), "重名模型应打 dup 标记")
+        solo = [m for m in groups[self.PROVIDER_B]["models"] if m["id"] == "only-b"][0]
+        self.assertNotIn("dup", solo, "非重名模型不应有 dup 键")
+
+    def test_disabled_provider_is_filtered(self):
+        """systemDisabledReason 供应商必须被过滤（权威源漏拷回归）。"""
+        self.assertNotIn(self.PROVIDER_DISABLED, self._groups())
+
+
 class TestSaveModelHandler(EnhanceHandlerTestBase):
     """右键菜单的持久化 handler：把选择写进 enhance_config.json（= ⓪ 档来源）。
 

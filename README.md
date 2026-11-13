@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.24-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.26-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -151,6 +151,16 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.26（TPS 双源混合：事件流实时 + DB 快照结算）
+- **输入/命中缺失根治**：早到 `usage.delta` 暂存 `pendingUsage` 待桥接建成后回放（不再丢弃），`resetTurnStats` 追加清理会话/命令 ID，`diag` 新增 pending 计数；
+- **DB 快照结算层**：新增 `tps_snapshot.py` 只读 `db.sqlite` 聚合（口径移植自 `xhwxt/zcode-token-usage-statusbar` MIT），TPS 补丁升级为 4 组件（含快照 preload 桥 + main 只读 handler），渲染层 `Math.max` 回填会话/今日，旧会话也有累计，失败静默降级为纯事件流；
+- **测试**：新增 `test_tps_snapshot.py`（内存库口径）+ `TestTpsSnapshotBlock`（桥白名单/定界/迁移）+ 冒烟 pending/快照断言。
+
+#### 0.6.25（增强菜单清单对齐实际 + 状态条间距修复）
+- **菜单清单与设置页对齐**：候选表合并从 pid 级改为模型级（`config.json` 独有模型不再被丢弃）；`systemDisabledReason` 补拷，禁用供应商正确过滤；跨供应商重名模型标注供应商后缀；空模型组整组隐藏（不再显示"没有可用模型"占位）；
+- **状态条下方间距**：composer-below 模式读父容器纵向 gap 并以等量负 `marginBottom` 自适应抵消，gap 变化自动刷新；
+- **测试**：新增 `TestListModelsCompleteness`（真跑 handler：模型合并/空组隐藏/dup 标记/禁用过滤），挂载冒烟追加空组+dup 断言，TPS 冒烟锁 gap 补偿。
 
 #### 0.6.24（TPS 状态栏改版：会话输入/输出/平均命中 + 今日总耗）
 - **累计区重构**：删除第 N 轮、总用、命中绝对值、累思与思考显示，会话累计精简为 `输入 xx · 输出 xx · 平均命中 xx%`（输入>0 即显示，含 `0.00%`）；

@@ -744,6 +744,7 @@ ENHANCE_MARKER = b'zcode:enhance-prompt'
 # 注入块名（标记定界用，见下方「注入块」小节）
 MODELS_BLOCK = "zcode-models"
 ENHANCE_BLOCK = "zcode-enhance"
+TPS_SNAPSHOT_BLOCK = "ztps-snapshot"
 
 # 旧版（无标记定界）注入段的剥离正则——只用于把已装的老版本迁移到新格式
 PULLER_PRELOAD_STRIP_LEGACY = re.compile(
@@ -1107,6 +1108,66 @@ catch(n){return{success:!1,error:String(n)}}});
     return _wrap_block(MODELS_BLOCK, (read_h + write_h + fetch_h).encode())
 
 
+# ------------------------------------------------------------ TPS 快照的注入块
+
+_TPS_SNAPSHOT_HANDLER = '''
+__H__.handle("zcode:tps-snapshot",async(ev,t)=>{
+try{
+let{default:n}=await import("node:fs"),{default:r}=await import("node:path"),{default:i}=await import("node:os");
+let base=i.homedir();
+try{let s=JSON.parse(n.readFileSync(r.join(base,".zcode","v2","setting.json"),"utf-8"));
+if(s&&typeof s.dataBaseDir=="string"&&s.dataBaseDir.trim())base=s.dataBaseDir.trim()}catch(_){}
+let root=t.join(base,".zcode","v2"),f=t.join(root,"ztps-snapshot.json");
+let snap=null;
+try{snap=JSON.parse(n.readFileSync(f,"utf-8"))}catch(_){snap=null}
+if(!snap||typeof snap!="object"||!snap.sessions||!snap.today){
+return{success:!1,code:"no-snapshot",error:"快照不存在或已损坏（等 SessionStart 钩子刷新）"}}
+return{success:!0,stamp:snap.stamp,sessions:snap.sessions,today:snap.today}
+}catch(err){return{success:!1,code:"read-failed",error:"读取快照失败："+String(err&&err.message||err)}}});
+'''
+
+
+def _tps_snapshot_preload_block(electron_alias: str) -> bytes:
+    """暴露 1 个桥方法：getUsageSnapshot() —— 读 Python 写的用量快照 JSON。
+    快照缺失/损坏时 main 回 {success:!1}，渲染层静默降级为纯事件流。"""
+    e = electron_alias
+    body = (f'getUsageSnapshot:()=>{e}.ipcRenderer.invoke("zcode:tps-snapshot"),').encode()
+    return _wrap_block(TPS_SNAPSHOT_BLOCK, body)
+
+
+def _tps_snapshot_main_block(ipc_alias: str) -> bytes:
+    """在 ipcMain 别名的 SaveMcpToUserDirectory 前插入快照读取 handler。
+    纯 fs.readFileSync，不连 sqlite、不起子进程、不联网；刷新由 Python 侧
+    （sync.py SessionStart / 看护）负责，main 只读。"""
+    return _wrap_block(TPS_SNAPSHOT_BLOCK,
+                       _TPS_SNAPSHOT_HANDLER.replace("__H__", ipc_alias).encode())
+
+
+def _tps_snapshot_preload_state(blob: bytes | None):
+    """(injected, synced, clean, alias)。"""
+    if blob is None:
+        return False, False, None, None
+    a = PULLER_PRELOAD_ANCHOR.search(blob)
+    if a is None:
+        return False, False, None, None
+    alias = a.group(1).decode()
+    inj, synced, clean = _bridge_block_state(blob, TPS_SNAPSHOT_BLOCK,
+                                             _tps_snapshot_preload_block(alias))
+    return inj, synced, clean, alias
+
+
+def _tps_snapshot_main_state(blob: bytes | None):
+    if blob is None:
+        return False, False, None, None
+    a = PULLER_MAIN_ANCHOR.search(blob)
+    if a is None:
+        return False, False, None, None
+    alias = a.group(1).decode()
+    inj, synced, clean = _bridge_block_state(blob, TPS_SNAPSHOT_BLOCK,
+                                             _tps_snapshot_main_block(alias))
+    return inj, synced, clean, alias
+
+
 # ------------------------------------------------------------ 增强提示词的注入块
 
 def _enhance_preload_block(electron_alias: str) -> bytes:
@@ -1200,6 +1261,7 @@ let c=r2.config||{},acc=c.access||{},api=c.api||{};
 let ids=[].concat(c.personalModelIds||[],pm[pid2]||[]),models={};
 for(let id of ids){let s2=String(id||"").trim();if(s2&&!models[s2])models[s2]={name:s2}}
 pcCands.push({pid:pid2,p:{name:r2.providerName,kind:zkind(api.type),models:models,
+systemDisabledReason:(c.systemDisabledReason||r2.systemDisabledReason||null),
 options:{baseURL:String(api.baseUrl||""),apiKey:String(acc.apiKey||"")}},name:String(r2.providerName||"")})}
 srcTried.push("provider_config.json:"+pcCands.length)}}catch(_){srcTried.push("provider_config.json:err")}
 // ② config.json 的 provider（旧格式）→ 归一化成同一形状；已被 ① 覆盖的 providerId 跳过
@@ -1210,11 +1272,20 @@ let pid2=ent[0],pp=ent[1];
 if(!pp||typeof pp!="object")continue;
 cfgCands.push({pid:pid2,p:pp,name:String(pp.name||"")})}
 srcTried.push("config.json:"+cfgCands.length)}catch(_){srcTried.push("config.json:err")}
-// 合并：① 优先，缺失的用 ②（config.json 的 options.baseURL/apiKey 是显式的，作为回退）
+// 合并：① 优先，缺失的用 ②（config.json 的 options.baseURL/apiKey 是显式的，作为回退）。
+// 同 pid 时做模型级合并：config.json 独有的模型并入权威条目（实测 chat 类供应商
+// personalModelIds 可能滞后于 config 侧 models），同名不覆盖、显示名以权威源为准。
 let seen={};
 for(let c of pcCands)seen[c.pid]=1;
 let all=pcCands.slice();
-for(let c of cfgCands){if(seen[c.pid])continue;all.push(c);seen[c.pid]=1}
+for(let c of cfgCands){
+if(seen[c.pid]){
+let host=null;for(let h of all){if(h.pid===c.pid){host=h;break}}
+let hm=(host&&host.p&&(host.p.models||(host.p.models={})))||null;
+let cm=(c.p||{}).models||{};
+if(hm)for(let mid of Object.keys(cm)){if(!hm[mid])hm[mid]={name:String((cm[mid]||{}).name||mid)}}
+continue}
+all.push(c);seen[c.pid]=1}
 let byId={};for(let c of all)byId[c.pid]=c;
 // ============================================================
 // 「列出可用模型」模式（右键菜单用）：与 enhance-prompt **同一通道、同一份候选表**。
@@ -1228,7 +1299,13 @@ for(let c of all){
 if(!usable(c.p))continue;
 let ms=[],mm=(c.p||{}).models||{};
 for(let mid of Object.keys(mm))ms.push({id:mid,name:String((mm[mid]||{}).name||mid)});
+// 空模型组整组隐藏（usable 但无模型时不再渲染"没有可用模型"占位）
+if(!ms.length)continue;
 groups.push({providerId:c.pid,name:String(c.name||c.pid),models:ms})}
+// 跨供应商重名模型打 dup 标记，渲染层据此追加供应商后缀以区分
+let cnt={};
+for(let g of groups)for(let m of g.models)cnt[m.id]=(cnt[m.id]||0)+1;
+for(let g of groups)for(let m of g.models)if(cnt[m.id]>1)m.dup=!0;
 let cur=null;
 let cpid=String(cfg.providerId||"").trim(),cmid=String(cfg.modelId||"").trim();
 if(cpid&&cmid)cur={providerId:cpid,modelId:cmid};
@@ -2047,13 +2124,32 @@ def _process_script_inject(asar: Path, check_only: bool, revert: bool, src_path:
 
 def process_tps_footer(asar: Path, check_only: bool, revert: bool, tps_src: Path | None, *,
                        dry_run: bool = False, version: str | None = None) -> bool:
-    return _process_script_inject(asar, check_only, revert, tps_src,
-                                  label="TPS 统计栏", script_entry=TPS_SCRIPT_PATH, tag=TPS_TAG,
-                                  side_suffix=".tps-patch.json", bak_suffix=".tps.bak",
-                                  dry_run=dry_run, version=version)
+    """TPS 统计栏（0.6.26 起 4 组件：renderer 脚本 + index 挂载 + 快照 preload 桥 + main handler）。
+    ⚠️ zcode-tps.js 内**绝不调用 port.start()**(只 addEventListener,start 交给应用)——
+    否则会消费掉服务端 Initialize 启动握手,ZCode 3.12.2 会卡在启动界面。"""
+    return _process_ipc_patch(asar, check_only, revert, tps_src, TPS_SNAPSHOT_SPEC,
+                              dry_run=dry_run, version=version)
 
 
 # ------------------------------------------------- preload/main IPC 桥注入（通用链路）
+
+TPS_SNAPSHOT_SPEC = {
+    "label": "TPS 统计栏",
+    "script_entry": TPS_SCRIPT_PATH,
+    "tag": TPS_TAG,
+    "src_name": TPS_SCRIPT_PATH.split("/")[-1],
+    "preload_block": _tps_snapshot_preload_block,
+    "main_block": _tps_snapshot_main_block,
+    "preload_state": _tps_snapshot_preload_state,
+    "main_state": _tps_snapshot_main_state,
+    "side_suffix": ".tps-patch.json",
+    "bak_suffix": ".tps.bak",
+    "src_hint": "--tps-src",
+    # 0.6.25 及更早的 TPS 是 2 组件形态（仅 renderer 脚本 + index 挂载）。
+    # 迁移后若检测到"脚本与挂载在、但两个 IPC 块缺失"，check 报 stale 而非"不完整"，
+    # 这样 sync.check_state() 会判 stale → 自动重跑补齐，无需用户手动 revert。
+    "legacy_two_component": True,
+}
 
 PULLER_SPEC = {
     "label": "模型拉取按钮",
@@ -2141,6 +2237,10 @@ def _process_ipc_patch(asar: Path, check_only: bool, revert: bool, src_path: Pat
     if check_only:
         state = "已打" if installed else ("不完整" if (script_present or idx_tagged or pre_inj or main_inj) else "未打")
         if installed and (not (pre_synced and main_synced) or old_script):
+            state = "已打（含旧版组件，重跑可自动更新）"
+        if (not installed and spec.get("legacy_two_component") and script_present and idx_tagged
+                and not pre_inj and not main_inj):
+            # 旧 2 组件形态：脚本与挂载都在，只是缺 IPC 块 → 视为 stale，自动重跑补齐
             state = "已打（含旧版组件，重跑可自动更新）"
         print(f"[*] {asar}\n    {label}注入: {state} | {comp} | sidecar: {'有' if saved else '无'} | "
               f"备份: {'有' if bak.is_file() else '无'}")

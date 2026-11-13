@@ -1,12 +1,18 @@
 /**
- * ZCode 状态栏：TPS 统计胶囊 —— 事件流实现（唯一方案）
+ * ZCode 状态栏：TPS 统计胶囊 —— 双源混合（事件流实时 + DB 快照结算）
  * ==================================================
  * 输入框工具栏常驻胶囊：● 首 token · tok/s │ 输入 · 输出 · 平均命中 │ 总耗(今日)
  *
- * 数据源（ZCode 主进程经 window.postMessage 转交的 ServicePort 事件流）：
+ * 数据源：
+ *   实时层（ServicePort 事件流，经 window.postMessage 转交）：
  *   - version:1 事件流：usage.delta（真实 outputTokens/inputTokens）、stream.chunk
  *   - conversation 行事件：turnHeader / userInput / reasoning / assistantText / row.delta
- * 由此得到精确的 tok/s（4s 滑动窗口）、首 token 延迟、会话累计与今日总耗。
+ *   由此得到 0 延迟的 tok/s（4s 滑动窗口）、首 token 延迟、输出估算。
+ *   结算层（DB 快照，经 zcode:tps-snapshot IPC 只读回传）：
+ *   - Python 侧 tps_snapshot.py 只读 ~/.zcode/cli/db/db.sqlite 聚合，
+ *     口径移植自 xhwxt/zcode-token-usage-statusbar (MIT)：completed 才计、
+ *     合计=computed_total、命中=cache_read/input。
+ *   两层以 Math.max 合并：事件优先、快照补漏（旧会话/关联失败时回填）。
  *
  * ⚠️ 关键约束：**绝不调用 port.start()**
  *   MessagePort 队列一旦启用，消息只派发给"启用瞬间已注册的监听器"。本脚本是普通
@@ -124,6 +130,48 @@
       if (e && e.key === DAILY_KEY) { _dailyCache.raw = undefined; scheduleScan(); }
     });
   } catch (err) { /* 静默 */ }
+
+  // ---------- DB 快照结算层(渲染侧读缓存) ----------
+  // 事件流是"实时层"(首 token/tok/s/输出估算 0 延迟)，DB 快照是"结算层"
+  // (会话输入/输出/命中/今日的官方落库精确值，天然全历史)。
+  // 口径移植自 xhwxt/zcode-token-usage-statusbar (MIT)：completed 才计、
+  // 合计=computed_total、命中=cache_read/input。
+  // 快照由 Python 侧(tps_snapshot.py)经 sync/看护触发点写入，main 经
+  // zcode:tps-snapshot IPC 只读回传；此处 5s TTL 缓存，失败静默降级为纯事件流。
+  const SNAP_TTL_MS = 5000;
+  let _snapCache = { at: 0, ok: false, stamp: 0, sessions: null, today: null, pending: false };
+  function refreshSnapshot() {
+    const now = Date.now();
+    if (_snapCache.pending || now - _snapCache.at < SNAP_TTL_MS) return;
+    let api = null;
+    try { api = window.zcode && window.zcode.getUsageSnapshot; } catch (err) { api = null; }
+    if (typeof api !== "function") return;   // 无桥(旧版补丁/未注入)：纯事件流
+    _snapCache.pending = true;
+    try {
+      const p = api();
+      if (p && typeof p.then === "function") {
+        p.then((r) => {
+          _snapCache.pending = false;
+          _snapCache.at = Date.now();
+          if (r && r.success && r.sessions && r.today) {
+            _snapCache.ok = true;
+            _snapCache.stamp = r.stamp || 0;
+            _snapCache.sessions = r.sessions;
+            _snapCache.today = r.today;
+            scheduleScan();
+          }
+        }, () => { _snapCache.pending = false; _snapCache.at = Date.now(); });
+      } else { _snapCache.pending = false; _snapCache.at = now; }
+    } catch (err) { _snapCache.pending = false; _snapCache.at = now; }
+  }
+  const snapSession = (sid) => {
+    if (!_snapCache.ok || !sid || !_snapCache.sessions) return null;
+    return _snapCache.sessions[sid] || null;
+  };
+  const snapTodayTotal = () => {
+    if (!_snapCache.ok || !_snapCache.today) return 0;
+    return _snapCache.today.total || 0;
+  };
 
   // ---------- 侧边栏/辅助对话与主会话边界判定 ----------
   // 核心诉求：无论何时只挂载在主界面对话框，绝不在侧边栏（辅助对话）来回跳动。
@@ -265,6 +313,11 @@
   const rowTurn = new Map();        // rowId -> turnId（row.delta 增量归属）
   const respTurn = new Map();       // assistantResponseId -> turnId（stream.chunk 的 assistantMessageId 归属）
   const scidTurn = new Map();       // sourceCommandId -> turnId（usage.delta 关联兜底）
+  // 早到 usage.delta 暂存：scid -> [{ev, at}]。首批带 input 的 delta 常早于 turnHeader/
+  // respTurn 桥接到达，旧逻辑直接丢弃导致输入恒 0；此处暂存，桥接建成后回放。
+  const pendingUsage = new Map();
+  const PENDING_CAP = 50, PENDING_TTL_MS = 5 * 60 * 1000;
+  let appliedFromPending = 0;
 
   const get = (id) => {
     if (!turns.has(id)) turns.set(id, {
@@ -283,6 +336,9 @@
     t.firstChunkAt = null; t.rowFirstAt = null; t.lastUsageAt = null;
     t.outputTokens = 0; t.inputTokens = 0; t.cacheReadTokens = 0; t.cacheWriteTokens = 0; t.reasoningTokens = 0; t.totalTokens = 0;
     t.textTok = 0; t.win = []; t.lastTps = null; t.streaming = true;
+    // 旧会话 ID/命令 ID 不清会污染新轮：sessionId 导致 renderBar 会话过滤误杀，
+    // sourceCommandId 导致 findByScid 把旧轮当新轮命中（usage 串台）
+    t.sessionId = null; t.sourceCommandId = null;
   }
 
   // token 粗估：CJK 字符 1 字 ≈ 1 token，其余 4 字符 ≈ 1 token
@@ -320,13 +376,13 @@
       t.activeMs = row.activeMs ?? t.activeMs;
       t.modelDurationMs = row.modelDurationMs ?? t.modelDurationMs;
       t.streaming = row.state != null && !/^(completedSuccess|completed|failed|stopped|cancelled)/.test(row.state);
-      if (row.sourceCommandId) t.sourceCommandId = row.sourceCommandId;
+      if (row.sourceCommandId) { t.sourceCommandId = row.sourceCommandId; replayPending(row.sourceCommandId, t); }
       scheduleScan();
     } else if (row.kind === "userInput") {
       if ((t.endedAt != null || t.lastUsageAt != null) && row.createdAt && row.createdAt !== t.startedAt) resetTurnStats(t);
       t.startedAt = row.createdAt ?? t.startedAt;
       t.streaming = true;
-      if (row.sourceCommandId) t.sourceCommandId = row.sourceCommandId;
+      if (row.sourceCommandId) { t.sourceCommandId = row.sourceCommandId; replayPending(row.sourceCommandId, t); }
       scheduleScan();
     } else if (row.kind === "reasoning" || row.kind === "assistantText") {
       if (row.assistantResponseId) respTurn.set(row.assistantResponseId, row.turnId);
@@ -347,6 +403,35 @@
     pushWin(t, Date.now(), t.textTok);
   }
 
+  // 单条 usage.delta 累加到轮（直达与 pending 回放共用；addDaily 不在此，避免今日重复计）
+  function applyUsage(t, ev) {
+    t.outputTokens += ev.outputTokens || 0;
+    t.inputTokens += ev.inputTokens || 0;
+    t.cacheReadTokens += ev.cacheReadTokens || 0;
+    t.cacheWriteTokens += ev.cacheWriteTokens || 0;
+    t.reasoningTokens += ev.reasoningTokens || 0;
+    t.totalTokens += ev.totalTokens || 0;
+    t.modelId = ev.modelId || t.modelId;
+    if (t.modelId && typeof window !== "undefined") {
+      window.__ztpsCurrentModelId = t.modelId;
+    }
+    t.sessionId = ev.sessionId || t.sessionId;
+    t.lastUsageAt = ev.occurredAt ?? t.lastUsageAt;
+  }
+  // 桥接建成后回放该 scid 的暂存 delta
+  function replayPending(scid, t) {
+    if (!scid || !pendingUsage.has(scid)) return;
+    const list = pendingUsage.get(scid);
+    pendingUsage.delete(scid);
+    const now = Date.now();
+    for (const item of list) {
+      if (now - item.at > PENDING_TTL_MS) continue;
+      applyUsage(t, item.ev);
+      appliedFromPending++;
+    }
+    scheduleScan();
+  }
+
   function onEvent(ev) {
     if (!ev || ev.version !== 1) return;
     const scid = ev.sourceCommandId;
@@ -354,19 +439,19 @@
       if (!scid) return;
       addDaily(ev);   // 今日总耗:与轮关联无关,每条精确用量都计入(幂等去重)
       const t = findByScid(scid) || turns.get(scidTurn.get(scid));
-      if (!t) return;
-      t.outputTokens += ev.outputTokens || 0;
-      t.inputTokens += ev.inputTokens || 0;
-      t.cacheReadTokens += ev.cacheReadTokens || 0;
-      t.cacheWriteTokens += ev.cacheWriteTokens || 0;
-      t.reasoningTokens += ev.reasoningTokens || 0;
-      t.totalTokens += ev.totalTokens || 0;
-      t.modelId = ev.modelId || t.modelId;
-      if (t.modelId && typeof window !== "undefined") {
-        window.__ztpsCurrentModelId = t.modelId;
+      if (!t) {
+        // 桥接未建成（turnHeader/respTurn 还没到）：暂存待回放，不再丢弃
+        if (!pendingUsage.has(scid)) {
+          if (pendingUsage.size >= PENDING_CAP) {
+            const oldest = pendingUsage.keys().next().value;
+            pendingUsage.delete(oldest);
+          }
+          pendingUsage.set(scid, []);
+        }
+        pendingUsage.get(scid).push({ ev, at: Date.now() });
+        return;
       }
-      t.sessionId = ev.sessionId || t.sessionId;
-      t.lastUsageAt = ev.occurredAt ?? t.lastUsageAt;
+      applyUsage(t, ev);
       if (t.firstChunkAt == null && firstChunkByScid[scid] != null) {
         t.firstChunkAt = firstChunkByScid[scid];
       }
@@ -376,7 +461,7 @@
       let t = findByScid(scid);
       if (!t && ev.assistantMessageId) {
         const tid = respTurn.get(ev.assistantMessageId);
-        if (tid) { t = turns.get(tid); if (t && scid) scidTurn.set(scid, tid); }
+        if (tid) { t = turns.get(tid); if (t && scid) { scidTurn.set(scid, tid); replayPending(scid, t); } }
       }
       if (!t && scid && scidTurn.has(scid)) t = turns.get(scidTurn.get(scid));
       if (!t) return;
@@ -609,7 +694,7 @@
   let diag = null;
   try {
     diag = window.__ztpsDiag = window.__ztpsDiag || {};
-    diag.scriptVersion = "3.15-daily";
+    diag.scriptVersion = "3.17-snap";
     diag.loadedAt = new Date().toISOString();
   } catch (err) { /* ignore */ }
 
@@ -619,18 +704,34 @@
   //   toolbar:        工具栏行内水平居中
   //   session-top:    消息区滚动容器首子元素,sticky 吸顶;负 margin-bottom 抵消文档流占位,
   //                   host 上 pointer-events:none 放行下方消息,胶囊本体恢复 auto
+  // 父容器纵向 gap 读数(px,解析失败/非 flex 返回 0):composer-below 的 gap 补偿用
+  function parentRowGap(el) {
+    if (!el || typeof getComputedStyle !== "function") return 0;
+    try {
+      const cs = getComputedStyle(el);
+      const disp = cs.display || "";
+      if (disp.indexOf("flex") < 0 && disp.indexOf("grid") < 0) return 0;
+      const raw = cs.rowGap && cs.rowGap !== "normal" ? cs.rowGap : cs.gap;
+      const v = parseFloat(raw);
+      return Number.isFinite(v) && v > 0 ? v : 0;
+    } catch (err) { return 0; }
+  }
   function attach(host, mode) {
     const changed = host.getAttribute("data-ztps-mode") !== mode;
     // 快路径：宿主已在文档树中、模式未变、且处于正确的父/兄弟节点下，无需重新查找 composer，0开销返回
     if (!changed && host.isConnected && host._target && host._target.isConnected) {
-      if (mode === "composer-below" && host.previousElementSibling === host._target) return true;
+      if (mode === "composer-below" && host.previousElementSibling === host._target) {
+        // gap 补偿过期检查：父容器 gap 变化（主题/版本切换）时重进挂载分支刷新补偿
+        if (host._gapv === parentRowGap(host.parentElement)) return true;
+      }
       if (mode === "session-top" && host.parentElement === host._target) return true;
       if (mode === "toolbar" && host.parentElement === host._target) return true;
     }
     if (mode === "composer-below") {
       const card = findComposerCard();
       if (!card || !card.parentElement || isInsideSidePane(card)) return false;
-      if (changed || host.parentElement !== card.parentElement || host.previousElementSibling !== card) {
+      if (changed || host.parentElement !== card.parentElement || host.previousElementSibling !== card
+          || host._gapv !== parentRowGap(card.parentElement)) {
         card.insertAdjacentElement("afterend", host);
         host.setAttribute("data-ztps-mode", mode);
         host.style.cssText = "";
@@ -641,6 +742,12 @@
           alignSelf: "stretch",          // 与 composer 卡片同宽
           pointerEvents: "auto",
         });
+        // 自适应 gap 补偿：host 作为新 flex 项把父容器一份纵向 gap 变成两份，
+        // 下半份暴露为胶囊下方留白；读父容器 rowGap 并以等量负 marginBottom 抵消。
+        // 解析失败/0 则不动（老布局/非 flex 父容器无回归）。
+        const gap = parentRowGap(card.parentElement);
+        host._gapv = gap;
+        if (gap > 0) host.style.marginBottom = (-gap) + "px";
       }
       host._target = card;
     } else if (mode === "session-top") {
@@ -731,8 +838,19 @@
         if (!latest || (t.startedAt ?? 0) > (latest.startedAt ?? 0)) latest = t;
       }
       let host = document.querySelector("[" + MARK + "-bar]");
+      // DB 快照结算层回填：事件优先、快照补漏（Math.max 保证流式值不被拉低）。
+      // 触发刷新（5s TTL，搭本次渲染顺带触发，不新增定时器）
+      refreshSnapshot();
+      const snap = snapSession(domSess);
+      if (snap) {
+        if ((snap.input || 0) > agg.input) agg.input = snap.input;
+        if ((snap.cache_read || 0) > agg.cache) agg.cache = snap.cache_read;
+        if ((snap.output || 0) > agg.output) agg.output = snap.output;
+      }
       // 今日总耗(全局口径:含所有会话/侧边栏,以 Σ(input+output) 精确值计)
       const today = readToday();
+      const snapToday = snapTodayTotal();
+      if (snapToday > today.total) today.total = snapToday;
       if (diag) {
         diag.domSessionId = domSess;
         diag.visibleTurns = visible.size;
@@ -741,6 +859,11 @@
         diag.posMode = mode;
         diag.todayKey = today.key;
         diag.todayTotal = today.total;
+        diag.pendingUsageSize = pendingUsage.size;
+        diag.appliedFromPending = appliedFromPending;
+        diag.snapshotHit = !!snap;
+        diag.snapshotTs = _snapCache.stamp || 0;
+        diag.snapshotAge = _snapCache.ok ? (Date.now() - _snapCache.at) : -1;
         if (latest) {
           diag.latest = {
             msgId: latest.msgId, sessionId: latest.sessionId,
@@ -814,7 +937,7 @@
       // 内容签名:未变化时完全跳过 DOM 写入与排版回流，达到零开销
       const key = [s.stamp, s.ttft, s.tps, s.out, s.reasoning, s.streaming,
                    agg.rounds, agg.input, agg.cache, agg.cacheWrite, agg.reasoning, agg.output,
-                   today.key, today.total].join("|");
+                   today.key, today.total, _snapCache.stamp].join("|");
       let segs = pill._zsegs;
       if (pill._zkey !== key) {
         pill._zkey = key;
@@ -894,6 +1017,12 @@
     }
     for (const k of Object.keys(firstChunkByScid)) {
       if (!scidTurn.has(k) && now - (firstChunkByScid[k] || 0) > PRUNE_MS) delete firstChunkByScid[k];
+    }
+    // 暂存 delta 过期清理：桥接 5 分钟还没建成的 scid 视为孤儿（轮已被删/会话已切）
+    for (const [scid, list] of pendingUsage) {
+      const fresh = list.filter((item) => now - item.at <= PENDING_TTL_MS);
+      if (fresh.length) pendingUsage.set(scid, fresh);
+      else pendingUsage.delete(scid);
     }
   }
 

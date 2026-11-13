@@ -284,6 +284,15 @@ def main() -> int:
     desc = "、".join(("还原 " if rev else "应用 ") + (" ".join(a) or "内核补丁") for a, rev in raw_tasks)
     log(f"ZCode 已退出（等待 {waited}s），开始处理：{desc}")
 
+    # TPS 快照刷新（最佳努力）：ZCode 退出时 DB 不再写入，此时快照最完整。
+    # 渲染层下次启动经 IPC 读到的是新鲜快照；失败静默，不影响补丁任务。
+    try:
+        sys.path.insert(0, str(HERE))
+        import tps_snapshot
+        tps_snapshot.main([])
+    except Exception as e:
+        log(f"TPS 快照刷新失败（已降级为纯事件流）: {e!r}")
+
     tasks = batch_tasks(raw_tasks)
     failed = 0
     for args, revert in tasks:

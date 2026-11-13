@@ -497,6 +497,17 @@ def run_sync(echo: bool = False) -> str:
     if deferred:
         start_watchdog(deferred)
 
+    # TPS 快照刷新（最佳努力）：让用量快照在每次会话启动时更新一次。
+    # 渲染层经 zcode:tps-snapshot IPC 读快照做"结算层"回填；刷新失败静默，
+    # 渲染层自动降级为纯事件流，不影响同步结论。
+    if wanted.get("tps_footer"):
+        try:
+            sys.path.insert(0, str(HERE))
+            import tps_snapshot
+            tps_snapshot.main([], quiet=True)
+        except Exception as e:
+            log(f"TPS 快照刷新失败（已降级为纯事件流）: {e!r}")
+
     parts = []
     if changed:
         parts.append("已写入: " + "、".join(changed))

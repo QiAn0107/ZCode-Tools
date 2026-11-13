@@ -35,3 +35,16 @@ SOFTWARE.
 
 - 输入框「增强提示词」的交互与提示词要点对齐了 WorkBuddy 的 `input.enhance` 功能，
   提示词模板为本项目自行撰写。
+
+## 3. 用量快照 SQL 口径（MIT License）
+
+- 文件：`skills/zcode-tools/scripts/tps_snapshot.py`
+- 用量聚合 SQL 与口径（completed 过滤、computed_total 合计、命中率定义）移植自
+  [xhwxt/zcode-token-usage-statusbar](https://github.com/xhwxt/zcode-token-usage-statusbar) 的 `zusage.py`。
+
+```
+MIT License
+
+Copyright (c) 2026 xhwx
+```
+（MIT 全文见上节第 1 条所附，条款相同。）

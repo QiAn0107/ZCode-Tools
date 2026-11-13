@@ -885,15 +885,16 @@ class TestCheckStateWording(unittest.TestCase):
 
 
 class TestScriptInjectStaleDetection(TempCase):
-    """`--tps-footer` / `--thought-slider` 的 `--check` 必须能报出「脚本是旧版」。
+    """`--tps-footer` 的 `--check` 必须能报出「组件是旧版」。
 
-    锁死的是一个真实故障：`_process_script_inject` 的 check 分支原先只判
-    「index.html 有 tag 且脚本条目存在」，**从不比对脚本内容** —— 于是旧脚本也打
-    裸「已打」→ `sync.check_state()` 判 on → `run_sync` 走 `continue`（视为已一致）
+    锁死的是一个真实故障：check 分支原先只判「index.html 有 tag 且脚本条目
+    存在」，**从不比对脚本内容** —— 于是旧脚本也打裸「已打」→
+    `sync.check_state()` 判 on → `run_sync` 走 `continue`（视为已一致）
     → **脚本改了永远不生效，而且一句报错都没有**。
 
-    这与 `--model-puller` 那条链路（会算 old_script 并输出「含旧版组件」）不一致，
-    正是同一个「静默失效链」的第三个入口。特征串必须逐字一致：
+    0.6.26 起 TPS 是 4 组件形态（renderer 脚本 + index 挂载 + 快照 preload 桥
+    + main handler），任一组件旧都报 stale；0.6.25 及更早的 2 组件形态
+    （缺 IPC 块）同样报 stale，触发自动重跑补齐。特征串必须逐字一致：
     `check_state()` 只认「含旧版组件」。
     """
 
@@ -901,12 +902,20 @@ class TestScriptInjectStaleDetection(TempCase):
     SCRIPT = "out/renderer/zcode-tps.js"
     TAG = '<script src="./zcode-tps.js"></script>'
 
-    def _build(self, injected: bytes) -> None:
+    def _build(self, injected: bytes, with_ipc: bool = True) -> None:
         self.asar = self.tmp / "app.asar"
-        build_asar(self.asar, {
+        files = {
             self.INDEX: ("<html><body>" + self.TAG + "</body></html>").encode("utf-8"),
             self.SCRIPT: injected,
-        })
+        }
+        if with_ipc:
+            files[zp.PULLER_PRELOAD_PATH] = (
+                b'_.contextBridge.exposeInMainWorld("zcode",{'
+                + zp._tps_snapshot_preload_block("_") + b"other:1});")
+            files[zp.PULLER_MAIN_PATH] = (
+                b"var x=1;\n" + zp._tps_snapshot_main_block("j")
+                + b"j.handle(E.SaveMcpToUserDirectory,()=>{});")
+        build_asar(self.asar, files)
         self.src = self.tmp / "zcode-tps.js"
         self.src.write_bytes(b"console.log('new-version');")
 
@@ -935,6 +944,18 @@ class TestScriptInjectStaleDetection(TempCase):
         out = self._check()
         self.assertIn("已打", out)
         self.assertNotIn("含旧版组件", out)
+
+    def test_legacy_two_component_is_reported_stale(self):
+        """0.6.25 及更早的 2 组件形态（缺 IPC 块）必须报 stale，触发自动重跑补齐。
+
+        若报裸「已打」→ sync 判 on → IPC 块永远补不上，快照桥缺失；
+        若报「不完整」→ sync 判 unknown → 报"状态未知"失败。两种都不对。
+        """
+        self._build(b"console.log('new-version');", with_ipc=False)
+        out = self._check()
+        self.assertIn("含旧版组件", out)
+        self.assertIn("preload 桥: 无", out)
+        self.assertIn("main handler: 无", out)
 
 class TestProcessProbeDecodesSafely(unittest.TestCase):
     """进程探测器必须能同时接住 subprocess 返回的 str 和 bytes。
@@ -1231,6 +1252,80 @@ class TestInjectionBlocks(unittest.TestCase):
     def test_enhance_block_absent_when_not_injected(self):
         blob = b'_.contextBridge.exposeInMainWorld("zcode",{other:1});'
         self.assertEqual(zp._enhance_preload_state(blob)[:2], (False, False))
+
+
+class TestTpsSnapshotBlock(unittest.TestCase):
+    """TPS 快照 IPC 桥（0.6.26）：渲染层经它读 Python 写的用量快照 JSON。
+
+    安全白名单：main handler 只做 fs.readFileSync 读快照文件——不连 sqlite、
+    不起子进程、不联网；刷新由 Python 侧（sync/看护）负责。"""
+
+    def test_preload_exposes_snapshot_bridge(self):
+        code = zp._tps_snapshot_preload_block("_").decode()
+        self.assertIn("getUsageSnapshot", code)
+        self.assertIn("zcode:tps-snapshot", code)
+        self.assertIn(zp.TPS_SNAPSHOT_BLOCK, code, "块必须有标记定界")
+
+    def test_main_handler_is_readonly_file_bridge(self):
+        code = zp._tps_snapshot_main_block("j").decode()
+        self.assertIn('handle("zcode:tps-snapshot"', code)
+        self.assertIn("ztps-snapshot.json", code)
+        self.assertIn("readFileSync", code)
+        for banned in ("sqlite", "execFile", "execSync", "spawn", "fetch(",
+                       "httpsMod", "httpMod", "XMLHttpRequest", "writeFileSync"):
+            self.assertNotIn(banned, code, f"快照 handler 不得包含 {banned}")
+        # 缺失/损坏必须返回可识别的失败码，渲染层据此降级为纯事件流
+        self.assertIn("no-snapshot", code)
+        self.assertIn("success:!1", code)
+
+    def test_main_injection_is_valid_js(self):
+        import shutil
+        import subprocess
+        import tempfile
+        code = zp._tps_snapshot_main_block("j").decode()
+        # main handler 是裸 j.handle(...) 调用：包一层 stub 做真语法检查
+        stub = "const j={handle:()=>{}};\n" + code
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("no node")
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                         encoding="utf-8") as f:
+            f.write(stub)
+            path = f.name
+        try:
+            r = subprocess.run([node, "--check", path], capture_output=True)
+            self.assertEqual(r.returncode, 0,
+                             f"快照 main handler 语法错误：{r.stderr[:300]}")
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_blocks_coexist_with_others(self):
+        """三块共用锚点互不干扰，摘除快照块不伤其它块。"""
+        snap_pre = zp._tps_snapshot_preload_block("_")
+        blob = (b'_.contextBridge.exposeInMainWorld("zcode",{'
+                + zp._models_preload_block("_") + zp._enhance_preload_block("_")
+                + snap_pre + b"other:1});")
+        inj, synced, clean, _ = zp._tps_snapshot_preload_state(blob)
+        self.assertTrue(inj and synced)
+        s = zp._block_span(blob, zp.TPS_SNAPSHOT_BLOCK)
+        stripped = blob[:s[0]] + blob[s[1]:]
+        self.assertIsNone(zp._block_span(stripped, zp.TPS_SNAPSHOT_BLOCK))
+        self.assertIn(zp._enhance_preload_block("_"), stripped)
+
+    def test_spec_uses_stable_sidecar_names(self):
+        """TPS 迁移到 4 组件链路后，sidecar/bak 后缀保持不变（旧备份可复用）。"""
+        self.assertEqual(zp.TPS_SNAPSHOT_SPEC["side_suffix"], ".tps-patch.json")
+        self.assertEqual(zp.TPS_SNAPSHOT_SPEC["bak_suffix"], ".tps.bak")
+        self.assertEqual(zp.TPS_SNAPSHOT_SPEC["script_entry"], zp.TPS_SCRIPT_PATH)
+        self.assertTrue(zp.TPS_SNAPSHOT_SPEC.get("legacy_two_component"),
+                        "必须标记旧 2 组件形态，check 才能报 stale 自动迁移")
+
+    def test_tps_footer_uses_ipc_chain(self):
+        """process_tps_footer 必须走 4 组件通用链路（含快照桥）。"""
+        import inspect
+        src = inspect.getsource(zp.process_tps_footer)
+        self.assertIn("_process_ipc_patch", src)
+        self.assertIn("TPS_SNAPSHOT_SPEC", src)
 
 
 class TestEnhancePromptScript(unittest.TestCase):

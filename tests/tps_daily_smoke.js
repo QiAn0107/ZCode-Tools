@@ -155,6 +155,36 @@ check(src.indexOf('"empty|" + today.key + "|" + today.total') >= 0,
       "空态签名没有带今日值，空会话下今日变化不会刷新");
 check((src.match(/总耗 /g) || []).length >= 2, "有数据态与空态应都有「总耗」显示");
 
+// ---------- ④ composer-below 自适应 gap 补偿 ----------
+// host 作为新 flex 项会把父容器一份纵向 gap 变成两份，下半份暴露为胶囊下方留白。
+// 锁三件事：有 rowGap 读数 helper、有负 marginBottom 补偿、有 gap 变化过期刷新。
+check(/function parentRowGap\(el\)/.test(src), "缺 parentRowGap helper，无法读取父容器纵向 gap");
+check(/host\.style\.marginBottom = \(-gap\) \+ "px"/.test(src),
+      "composer-below 没有负 marginBottom 补偿，下方留白会回来");
+check(/host\._gapv !== parentRowGap\(/.test(src),
+      "缺 gap 变化过期检查，主题/版本切换改 gap 后补偿会过期");
+check(/scriptVersion = "3\.17-snap"/.test(src), "脚本版本号未同步到 3.17-snap");
+
+// ---------- ⑤ 早到 delta pending 回放 ----------
+// 首批带 input 的 delta 常早于 turnHeader/respTurn 桥接到达：必须暂存待回放，
+// 不得再直接丢弃（`if (!t) return` 是输入恒 0 的根因）。
+check(/const pendingUsage = new Map\(\)/.test(src), "缺 pendingUsage 暂存表，早到 delta 会被丢弃");
+check(/function applyUsage\(t, ev\)/.test(src), "缺 applyUsage（直达与回放共用的累加函数）");
+check(/function replayPending\(scid, t\)/.test(src), "缺 replayPending，暂存的 delta 永远回放不了");
+check(/replayPending\(row\.sourceCommandId, t\)/.test(src), "onRow 建桥后没有回放 pending");
+check(/replayPending\(scid, t\)/.test(src), "stream.chunk 建桥后没有回放 pending");
+check(!/const t = findByScid\(scid\) \|\| turns\.get\(scidTurn\.get\(scid\)\);\s*if \(!t\) return;/.test(src),
+      "usage.delta 仍在关联失败时直接 return（应暂存待回放）");
+
+// ---------- ⑥ DB 快照结算层回填 ----------
+// 事件流是实时层，DB 快照是结算层：以 Math.max 合并，事件优先、快照补漏。
+check(/getUsageSnapshot/.test(src), "没有经 zcode:tps-snapshot IPC 取快照");
+check(/snapSession\(domSess\)/.test(src), "没有按当前会话取快照回填");
+check(/snapToday > today\.total/.test(src),
+      "今日侧没有取 max(localStorage, 快照today)");
+check(/_snapCache\.stamp\]\.join/.test(src), "内容签名缺快照 stamp，快照到达不会重绘");
+check(/snapshotHit/.test(src), "diag 缺 snapshotHit，快照是否命中无法定位");
+
 // ---------- 汇报 ----------
 if (failures.length) {
   console.error("FAIL " + failures.length + " 项：");

@@ -362,8 +362,10 @@ async function menuTests() {
         success: true,
         groups: [
           { providerId: "prov-a", name: "供应商 A",
-            models: [{ id: "model-a", name: "model-a" }, { id: "model-b", name: "model-b" }] },
-          { providerId: "prov-b", name: "供应商 B", models: [{ id: "model-c", name: "model-c" }] },
+            models: [{ id: "model-a", name: "model-a" }, { id: "model-b", name: "model-b", dup: true }] },
+          { providerId: "prov-b", name: "供应商 B",
+            models: [{ id: "model-c", name: "model-c" }, { id: "model-b", name: "model-b", dup: true }] },
+          { providerId: "prov-empty", name: "空供应商", models: [] },
         ],
         current: null,
       };
@@ -396,7 +398,16 @@ async function menuTests() {
   check(labels.some((s) => s.indexOf("model-a") >= 0), "菜单应列出 model-a");
   check(labels.some((s) => s.indexOf("model-c") >= 0), "菜单应列出其它供应商的 model-c");
   check(menu().querySelectorAll(".zenhance-menu-group").length === 2,
-    "应按供应商分组，实际 " + menu().querySelectorAll(".zenhance-menu-group").length + " 组");
+    "应按供应商分组（空组整组隐藏），实际 " + menu().querySelectorAll(".zenhance-menu-group").length + " 组");
+  const groupTitles = menu().querySelectorAll(".zenhance-menu-group").map((el) => el.textContent);
+  check(groupTitles.indexOf("空供应商") < 0,
+    "空模型组不应渲染分组标题，实际=" + JSON.stringify(groupTitles));
+  const empties = menu().querySelectorAll(".zenhance-menu-empty").map((el) => el.textContent);
+  check(empties.length === 0,
+    "不应再渲染「没有可用模型」占位文案，实际=" + JSON.stringify(empties));
+  check(labels.some((s) => s.indexOf("model-b（供应商 A）") >= 0)
+        && labels.some((s) => s.indexOf("model-b（供应商 B）") >= 0),
+    "跨供应商重名模型应追加供应商后缀，实际=" + JSON.stringify(labels));
   check(labels.some((s) => s.indexOf("✓") === 0),
     "无 current 时「跟随界面选择」应打勾，实际=" + JSON.stringify(labels));
 

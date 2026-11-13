@@ -117,9 +117,10 @@ check(!/Math\.round\(\s*\(?\s*agg\.cache\s*\/\s*agg\.input\s*\)?\s*\*\s*100/.tes
 
 // ---------- ③ 布局/刷新逻辑已随本次改版更新 ----------
 // 新布局:即时(g0)+ 会话累计(g1:输入/输出/平均命中)+ 今日总耗(g2)。
-// 内容签名追加了 today.key/today.total(午夜滚动自动重绘);溢出先丢总耗段(p7)。
-check(/agg\.rounds,\s*agg\.input,\s*agg\.cache.*agg\.output,[\s\S]*?today\.key,\s*today\.total\]\.join/.test(src),
-      "状态栏内容签名缺今日字段，今日/午夜变化时不会重绘");
+// 内容签名追加了 today.key/today.total(午夜滚动自动重绘)与 _snapCache.stamp
+// (快照到达重绘);溢出先丢总耗段(p7)。
+check(/agg\.rounds,\s*agg\.input,\s*agg\.cache.*agg\.output,[\s\S]*?today\.key,\s*today\.total,\s*_snapCache\.stamp\]\.join/.test(src),
+      "状态栏内容签名缺今日/快照字段，今日变化或快照到达时不会重绘");
 check(/for \(const drop of \[7, 1, 2\]\)/.test(src),
       "渐进降级顺序不对:应先丢总耗(7),再丢首 token(1)/tok/s(2),会话累计保留");
 

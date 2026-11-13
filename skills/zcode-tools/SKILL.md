@@ -418,7 +418,7 @@ python zcode_patcher.py --revert   # 从 sidecar 还原
 
 ## 三、打开状态栏：TPS 统计胶囊
 
-> **实现：`zcode-tps.js`（唯一方案）—— 读 ServicePort 事件流，含精确 tok/s / 首 token / 会话累计 / 今日总耗**
+> **实现：`zcode-tps.js`（双源混合）—— 事件流做流式实时层 + DB 快照做精确结算层**
 >
 > 数据来自 preload 转交的端口事件流：`usage.delta`（真实 outputTokens/inputTokens）、
 > `stream.chunk`、行事件（turnHeader/userInput/reasoning/assistantText/row.delta）。
@@ -485,26 +485,33 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 
 统计条右键弹出自绘菜单，可在「输入框下方（默认）/ 输入框工具栏 / 会话顶部 sticky」间切换，`localStorage`（键 `ztps-pos`）记忆，重开保持：
 
-- **输入框下方**：composer 卡片之后的独立行（`insertAdjacentElement` 于卡片后），`alignSelf: stretch` 与输入框同宽。
+- **输入框下方**：composer 卡片之后的独立行（`insertAdjacentElement` 于卡片后），`alignSelf: stretch` 与输入框同宽；**自适应 gap 补偿**（0.6.25）：host 作为新 flex 项会把父容器一份纵向 gap 变成两份，挂载时读父容器 `rowGap` 并以等量负 `marginBottom` 抵消下半份，gap 变化时自动刷新（`host._gapv` 缓存比对）。
 - **输入框工具栏**：行内水平居中。
 - **会话顶部**：吸附到消息区滚动容器（从 `section[data-turn-id]` 向上找第一个 `overflow-y: auto/scroll` 且高 >120px 的祖先）第一个子元素，`position: sticky; top: 8px` 悬浮；host 上 `pointer-events: none` 放行下方消息。
 - 数据层零改动，仅挂载点不同；挂载点找不到（空态/设置页）时自清理，`window.__ztpsDiag.posMode`/`hiddenReason` 可诊断。右键修复注记：菜单用 pointerdown 捕获关外部点击时必须放行菜单内部按下，否则 click 在已移除节点上落空、选项永远点不中。
 
 ### 数据链路原理（无常驻服务）
 
+**实时层**（0 延迟，流式中即有数据）：
+
 1. ZCode 桌面端 preload 把主进程的 MessagePort 经 `window.postMessage("zcode:service-port", "*", [port])` 转交渲染页面；注入脚本监听该事件接管端口（`window.__ztpsHook` 可对存量端口手动补挂，`window.__ztpsPort` 暴露端口供调试旁路监听）。
 2. 会话协议帧为二进制（Uint8Array）内嵌 JSON（自首个 `{` 起），两类：
    - **version:1 事件流**（顶层带 sessionId/sourceCommandId/occurredAt）：`usage.delta`（inputTokens/outputTokens/cacheReadTokens/totalTokens/reasoningTokens，**每次模型请求完成时发**——一轮含工具调用会有多条，out 为该次请求输出）、`stream.chunk`（`assistantMessageId` + `chunkLength` + `channel`，流式期间每 50-100ms 一批）
    - **conversation 行事件**（`frame.payload.deltas`/`events`）：`turnHeader`（startedAt/endedAt/state）、`userInput`（createdAt）、`reasoning`/`assistantText`（`text` 全量 + `assistantResponseId`）、`row.delta`（`{rowId, path:"text", append:"文本增量"}`）
-3. **轮关联链**（事件里的 id 有两套，务必分清）：轮的 key 是 productTurnId（`msg_xxx`，与 DOM `section[data-turn-id]` 一致）；stream.chunk 的 `assistantMessageId` 是 assistantResponseId（另一个 msg_xxx），需经行事件的 `assistantResponseId → turnId` 映射中转；usage.delta 经 `sourceCommandId` 关联（turnHeader/userInput 行携带）。关联断了的表现：会话累计（输入/输出）与 tok/s 一直不出现（今日总耗不受影响，它在轮关联之前独立累加）。
+3. **轮关联链**（事件里的 id 有两套，务必分清）：轮的 key 是 productTurnId（`msg_xxx`，与 DOM `section[data-turn-id]` 一致）；stream.chunk 的 `assistantMessageId` 是 assistantResponseId（另一个 msg_xxx），需经行事件的 `assistantResponseId → turnId` 映射中转；usage.delta 经 `sourceCommandId` 关联（turnHeader/userInput 行携带）。首批 delta 常早于桥接到达——旧逻辑直接丢弃导致输入恒 0，现暂存 `pendingUsage` 待桥接建成后回放（`__ztpsDiag.pendingUsageSize/appliedFromPending` 可查）。
 4. 渲染：扫描 `section[data-turn-id]` + sessionId 双条件取当前会话最新轮 → 算指标 → 更新胶囊。
 5. 刷新机制：MutationObserver 回调里 16ms 节流的**同步**刷新（切换会话零残留）＋ 60ms 防抖全量扫 ＋ 1s 估算刷新节奏；渲染带内容签名（stamp/ttft/tps/out/streaming），数据未变零 DOM 写，保证同步刷新不触发 observer 自激。
+
+**结算层**（0.6.26，精确值 + 全历史，秒级延迟）：
+
+6. Python 侧 `tps_snapshot.py` 只读 `~/.zcode/cli/db/db.sqlite`（`mode=ro`），按 `session_id` 聚合 `model_usage`（`status='completed'`）+ 今日全局，写 `~/.zcode/v2/ztps-snapshot.json`；触发点为 SessionStart worker 与看护写补丁前（无新增常驻）。口径移植自 `xhwxt/zcode-token-usage-statusbar` (MIT)：合计=`computed_total`（=input+output，cache 已含 input 不重复加），命中=`cache_read/input`。
+7. 渲染层经 `zcode:tps-snapshot` IPC（preload 桥 + main 只读 handler，与 enhance bridge 同锚点模式）取快照，5s TTL 缓存；以 `Math.max(事件累计, 快照值)` 回填会话输入/输出/命中与今日总耗——事件优先、快照补漏，流式值不会被拉低。快照缺失/损坏/无桥时静默降级为纯事件流（`__ztpsDiag.snapshotHit/snapshotTs/snapshotAge` 可查）。
 
 ### 注入原理（asar 重打包级）
 
 与统计图补丁的同长度原地覆盖不同，状态栏要**新增文件**，必须整体重打包：
 
-1. 注入内容：`out/renderer/index.html` 的 `</body>` 前插 `<script src="./zcode-tps.js"></script>`；zcode-tps.js 作为新条目写入 `out/renderer/`。index.html 无 CSP meta、无 nonce，普通脚本标签即可（在 `type="module"` 的 React bundle 之前同步执行，注册监听早于应用挂载）。
+1. 注入内容（0.6.26 起 4 组件，走 `_process_ipc_patch` 通用链路）：`out/renderer/index.html` 的 `</body>` 前插 `<script src="./zcode-tps.js"></script>`；zcode-tps.js 作为新条目写入 `out/renderer/`；preload 加 `getUsageSnapshot` 桥（`/*zp:begin:ztps-snapshot*/` 定界）；main 加 `zcode:tps-snapshot` 只读 handler。index.html 无 CSP meta、无 nonce，普通脚本标签即可（在 `type="module"` 的 React bundle 之前同步执行，注册监听早于应用挂载）。0.6.25 及更早的 2 组件旧安装会被 check 报 stale，自动重跑补齐 IPC 块。
 2. asar 布局（读/写同一公式）：头 16 字节 = 4 个 uint32 LE `[4, headerSize, pickleLen, jsonLen]`，`pickleLen = 4 + jsonLen + pad4`，`headerSize = 8 + jsonLen + pad4`，数据区起点 = `16 + jsonLen + pad4`（pad4 把 JSON 补齐到 4 字节倍数）；文件条目 `offset` 为相对数据区起点的字符串，全部文件带 integrity（SHA256 全文 + 4MB 分块 hex）。
 3. 重打包流程：读全量 → 树上删条目/插占位/标记覆盖 → 全部条目 offset 重排 → 覆盖与新增条目重算 integrity → 写临时文件 → **回读校验**（逐条比对注入条目字节）→ 原子替换。
 4. **实现关键坑**（改 `_repack_asar` 前必读）：offset 重排会直接改写条目，此后从旧文件切片必须用**重排前快照的旧位置**，否则「新 offset + 旧数据区起点」错位读取（实测 50 个抽查文件错 11 个，且改动文件恰好走覆盖分支不受影响，极易漏测）；新增条目的树插入必须在重打包函数内部做（外层持有的树引用与函数内部重新读入的不是同一棵）。
@@ -519,6 +526,8 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 | 重启后无胶囊 | `--tps-footer --check` 看 state；渲染进程 console 查 `window.__ztps` 是否存在 |
 | console 出现 CSP 拦截报错 | 当前版本 index.html 无 CSP；若未来版本加了，需同步放宽 `script-src` 允许同目录脚本 |
 | 指标一直只有「●」/「● 总耗」 | usage.delta 未关联到轮（看 `window.__ztpsTurns` 里轮的 outputTokens/inputTokens/lastUsageAt 是否为空）；版本升级导致帧结构变化时，用 `window.__ztpsPort` 旁路监听原始帧比对字段 |
+| 输入/平均命中不出现但输出正常 | 先看 `__ztpsDiag.pendingUsageSize/appliedFromPending`：前者涨后者 0 = 桥接断裂，delta 全在暂存；再看 `snapshotHit`：false = 快照桥缺失（`python tps_snapshot.py --check` 查库，`--tps-footer --check` 看 4 组件是否齐） |
+| 旧会话无累计 | 快照未命中：`snapshotAge` 过大或 -1 = IPC 桥缺失/快照过期；手动跑 `python tps_snapshot.py` 刷新后重开会话 |
 | tok/s 不出现 | 该轮从未有过文本流（纯工具调用轮）时无速度可算，属预期；有文本流后静默期（工具执行）保持最近值 |
 | 想换脚本逻辑 | 改 zcode-tps.js 后重跑 `--tps-footer`（内容变了会自动热更新脚本条目，无需 revert） |
 
@@ -656,6 +665,12 @@ ref 档必然查不到 → 掉进兜底档 → 打到别的供应商 → `HTTP 4
 **用法**：在润色按钮上**右键** → 菜单按供应商分组列出所有**可用**模型（`usable()`：有
 baseURL + 有 apiKey + 无 `systemDisabledReason`）→ 点选某项即生效。
 菜单顶部有「跟随界面选择（默认）」用于清除选择（等价于删掉配置里的 `providerId`/`modelId`）。
+
+**清单口径（0.6.25）**：候选表以 `provider_config.json` 为权威，同 pid 时 `config.json`
+独有的模型会**模型级合并**进来（不再整条丢弃）；跨供应商重名模型标注供应商后缀
+（如 `glm-5.3-flash（火山方舟 Agent Plan）`）；usable 但无模型的供应商**整组隐藏**；
+无 baseURL 的供应商（如 Responses 协议内置端点型）不列出 —— handler 自拼 URL 发请求，
+列出来点了也只会 `no-baseurl`，不如不显示。
 
 **为什么"选了就生效"**：一次选择同时走两条路，互为兜底 ——
 
