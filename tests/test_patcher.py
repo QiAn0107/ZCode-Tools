@@ -1432,11 +1432,18 @@ class TestTpsSidePaneIsolation(unittest.TestCase):
         self.assertIn("isInsideSidePane(row)", self.src)
         self.assertIn("isInsideSidePane(sc)", self.src)
 
-    def test_tps_bar_removes_out_and_shows_session_total_tokens(self):
-        """TPS 状态栏必须去除本轮单轮 out，替换为本次会话已使用的总 Token（总用 xx）。"""
-        self.assertNotIn('span("out ")', self.src, "即时指标中不得再包含单轮 out 显示")
-        self.assertIn('span("总用 ")', self.src, "会话累计中必须包含会话总用量")
-        self.assertIn('fmtTok(totalTok)', self.src, "总用量必须格式化输出")
+    def test_tps_bar_layout_session_io_and_daily_total(self):
+        """TPS 状态栏布局：即时(首 token/tok/s) + 会话累计(输入/输出/平均命中) + 今日总耗。
+
+        已删除：第 N 轮、总用、命中绝对值、累思、思考显示；累出改名为输出。
+        """
+        for label in ('span("输入 ")', 'span("输出 ")', "平均命中", 'span("总耗 ")',
+                      "fmtPct", "DAILY_KEY", "addDaily", "readToday"):
+            self.assertIn(label, self.src, f"状态栏必须包含 {label}")
+        for gone in ('span("总用 ")', 'span("out ")', 'span("累出 ")', "累思",
+                     'span("思考 ")', '"第 " + agg', 'span("命中 "',
+                     'span("会话输入 ")', 'span("会话输出 ")', 'span("今日总耗 ")'):
+            self.assertNotIn(gone, self.src, f"状态栏不得再包含 {gone}")
 
 
 class TestDoctor(unittest.TestCase):

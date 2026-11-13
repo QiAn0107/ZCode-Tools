@@ -16,9 +16,11 @@ ZCode 客户端补丁工具
 
 三、TPS 统计栏（app.asar，--tps-footer）
   向渲染层 out/renderer/index.html 注入 zcode-tps.js（读 ServicePort 事件流得精确
-  tok/s/首 token/out；脚本内不调用 port.start()，否则 3.12.2 会卡启动）：
-  输入框下方常驻统计条（默认位置），左组=本轮即时指标（首 token/tok/s/out）、
-  右组=会话累计（第 N 轮/输入/命中+命中率/累出），空会话显示空态绿点常驻；
+  tok/s/首 token/会话累计/今日总耗；脚本内不调用 port.start()，否则 3.12.2 会卡启动）：
+  输入框下方常驻统计条（默认位置），左组=即时指标（首 token/tok/s）、
+  中组=会话累计（输入/输出/平均命中）、右组=今日总耗，空会话显示绿点（今日有消耗则附带总耗）；
+  胶囊右键可切「输入框下方（默认）/ 输入框工具栏 / 会话顶部 sticky」，localStorage 记忆。
+  数据取自页面内 MessagePort 会话事件流，无常驻服务；今日总耗按本地日期聚合存 localStorage。
   胶囊右键可切「输入框下方（默认）/ 输入框工具栏 / 会话顶部 sticky」，localStorage 记忆。
   数据取自页面内 MessagePort 会话事件流，无常驻服务。
   重打包级修改：整体重排 asar 目录、对改动文件重算 integrity。

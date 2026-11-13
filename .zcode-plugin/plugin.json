@@ -1,6 +1,6 @@
 {
   "name": "zcode-tokenspeed",
-  "version": "0.6.23",
+  "version": "0.6.24",
   "description": "ZCode 桌面客户端全方位原生体验增强套件：TPS 实时状态栏、提示词多模型智能润色、用量图表去截断与设置页模型拉取。内置客户端升级自动感知与无感自愈看护，全量幂等、安全可还原，支持按需逐项开关。",
   "author": {
     "name": "c80361619"
@@ -17,7 +17,7 @@
     "tps_footer": {
       "type": "boolean",
       "title": "TPS 状态栏",
-      "description": "输入框下方统计条（本轮指标 + 会话累计，右键可切位置）。默认开启；需要改写 app.asar，会在你完全退出 ZCode 时写入，下次启动可见。",
+      "description": "输入框下方统计条（即时指标 + 会话累计 + 今日总耗，右键可切位置）。默认开启；需要改写 app.asar，会在你完全退出 ZCode 时写入，下次启动可见。",
       "default": true
     },
     "model_puller": {

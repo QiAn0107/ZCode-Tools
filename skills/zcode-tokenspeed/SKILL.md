@@ -212,7 +212,7 @@ python "<skill目录>/scripts/zcode_patcher.py" --model-puller
 |---|---|---|---|
 | 打开统计图 | 用量页趋势图/饼图去截断 | `python zcode_patcher.py --usage-chart [--check/--revert]` | app.asar 内渲染文件（同长度原地改字节 + integrity 同步） |
 | 加宽模型弹窗 | 模型选择浮窗加宽，长模型名不再截断 | `python zcode_patcher.py [--check/--revert]` | app.asar 内主 bundle（同长度原地改字节） |
-| 打开状态栏 | 输入框下方居中统计条（**v2 纯 DOM 观测，3.12.2+ 安全**；右键可切工具栏/会话顶部 sticky）：本轮指标 + 会话累计（第 N 轮/输入/命中+平均命中率/累出） | `python zcode_patcher.py --tps-footer [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
+| 打开状态栏 | 输入框下方居中统计条（**v2 纯 DOM 观测，3.12.2+ 安全**；右键可切工具栏/会话顶部 sticky）：即时指标（首 token/tok/s）+ 会话累计（输入/输出/平均命中率）+ 今日总耗 | `python zcode_patcher.py --tps-footer [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
 | 模型拉取按钮 | 设置页一键拉取/勾选模型 | `python zcode_patcher.py --model-puller [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
 | **增强提示词** | 输入框旁一键润色草稿（可恢复原文）；**右键**弹出菜单选择使用哪个模型 | `python zcode_patcher.py --enhance-prompt [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
 
@@ -418,7 +418,7 @@ python zcode_patcher.py --revert   # 从 sidecar 还原
 
 ## 三、打开状态栏：TPS 统计胶囊
 
-> **实现：`zcode-tps.js`（唯一方案）—— 读 ServicePort 事件流，含精确 tok/s / 首 token / out**
+> **实现：`zcode-tps.js`（唯一方案）—— 读 ServicePort 事件流，含精确 tok/s / 首 token / 会话累计 / 今日总耗**
 >
 > 数据来自 preload 转交的端口事件流：`usage.delta`（真实 outputTokens/inputTokens）、
 > `stream.chunk`、行事件（turnHeader/userInput/reasoning/assistantText/row.delta）。
@@ -441,7 +441,7 @@ python zcode_patcher.py --revert   # 从 sidecar 还原
 > start，会让"不 start"也失败，从而误判为"方案不可行"（曾据此绕过一圈）。
 >
 > **已知特性**：tok/s 在开始生成后约 1~4 秒才出现（滑动窗口需 ≥2 个采样点，且思考阶段
-> 无文本增量），期间只显示 `●` 与时间，属预期；out（本轮累计输出）到达后立即显示。
+> 无文本增量），期间只显示 `●`（今日有消耗时附带 `总耗 xx`），属预期。
 >
 > 本脚本基于社区分享版本实现，只删除了 `port.start()` 一行并补充自诊断，**计算逻辑与原版一致**。
 > ⚠️ **回滚预案**：改动 asar 前先 `python scripts/restore_clean.py --backup` 存一份干净副本，
@@ -449,16 +449,17 @@ python zcode_patcher.py --revert   # 从 sidecar 还原
 
 > 本能力与思考等级补丁基于社区分享版本实现（原作者已授权"可以直接借鉴定制"）；本仓库在原基础上做了打包内核重写（纯 Python、保留 unpacked、原子替换）、跨平台/跨版本适配、全外科手术式还原等工程化改造。
 
-**默认挂在输入框（composer 卡片）下方、水平居中**的独立统计行（右键可切到工具栏行内居中或会话顶部 sticky），左组为**当前会话最近一轮**的即时指标，右组为**当前会话累计**（不含时间）：
+**默认挂在输入框（composer 卡片）下方、水平居中**的独立统计行（右键可切到工具栏行内居中或会话顶部 sticky），左组为即时指标，中组为**当前会话累计**，右组为**今日总耗**（不含时间）：
 
 ```
-生成中:  ● 32 tok/s · out 410 │ 第 8 轮 │ 输入 45.2k · 命中 38.1k · 平均命中 84.00% · 累出 12.3k
-结束后:  ● 首 token 37s · out 1.7k │ 第 8 轮 │ 输入 45.2k · 命中 38.1k · 平均命中 84.00% · 累出 12.3k
-空会话:  ●            （绿点空态常驻，不显示假时钟）
+生成中:  ● 32 tok/s │ 输入 45.2k · 输出 12.3k · 平均命中 84.00% │ 总耗 58.1k
+结束后:  ● 首 token 37s · 45 tok/s │ 输入 45.2k · 输出 12.3k · 平均命中 84.00% │ 总耗 58.1k
+空会话:  ● 总耗 58.1k（今日无消耗时仅显示 ●）
 ```
 
-- **会话累计口径**：轮数=可见轮次数；输入/命中/累出=各轮 `usage.delta` 累加（API 计费视角，每轮 inputTokens 含历史所以累计值偏大，属预期）；平均命中=累计命中 ÷ 累计输入，**固定两位小数四舍五入**（`fmtPct`，不足补零，如 `84.00%`）；流式中未报 usage 的轮以内容估算兜底。
-- **渐进降级顺序**：溢出时先丢本轮 out → 首 token → tok/s，会话累计段保留。
+- **会话累计口径**：输入/输出=各轮 `usage.delta` 累加（API 计费视角，每轮 inputTokens 含历史所以累计值偏大，属预期）；平均命中=累计缓存命中 ÷ 累计输入（`input>0` 即显示，`0.00%` 也显示），**固定两位小数四舍五入**（`fmtPct`，不足补零，如 `84.00%`）；流式中未报 usage 的轮以内容估算兜底。
+- **今日总耗口径**：今日 Σ(inputTokens + outputTokens)，只计 `usage.delta` 精确值（不含流式估算），按 `occurredAt` 本地日期分桶；全局口径，含所有会话与侧边栏辅助对话。仅补丁运行期间捕获（ZCode 未运行时/历史消耗不计）；数据存 `localStorage`（键 `ztps-daily-v1`），保留近 30 天，重复事件幂等去重，多窗口经 `storage` 事件同步，清 localStorage 即清零。
+- **渐进降级顺序**：溢出时先丢总耗 → 首 token → tok/s，会话累计段保留。
 
 ```bash
 python zcode_patcher.py --tps-footer             # 注入 scripts/zcode-tps.js
@@ -470,15 +471,15 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 ### 行为规则（验收标准）
 
 - **绿点 ● 常驻**：有可展示的轮次就在；流式生成中绿点发亮，空闲静态。不显示时间。
-- **分隔符**：组内 `·`、本轮组与会话累计组之间竖线 `│`；标签灰、数值白、tok/s 与平均命中橙、tabular-nums 对齐。
+- **分隔符**：组内 `·`、组之间竖线 `│`；标签灰、数值白、tok/s 与平均命中橙、tabular-nums 对齐。
 - **同一 turnId 复用（编辑重发/重试）自动清零**：检测到新一轮开始即重置旧统计，杜绝「时间变新、指标是旧的」残留。
-- **out 语义**：**本轮累计输出**（最近一次提问→回答完成为止），非会话累计。
-- **动态刷新**：流式中 1 秒节奏刷新——tok/s 为 4s 滑动窗口即时速度、out 为本轮估算值；基于回答文本的 token 估算（CJK 1 字≈1 token、其余 4 字符≈1 token）。`usage.delta` 精确值随每次模型请求完成到达即覆盖估算；轮结束后为精确值（精确 out ÷ 首块→末次 usage 的解码窗口）。
-- **静默期保持**：工具执行期间文本停止增长，速度保持最近值不消失；点停止/出错时该次请求不报 usage，out 以内容估算兜底、速度保持最近值——已产生的数据不凭空消失。
+- **平均命中常显**：`输入>0` 即显示（含 `0.00%`），不再要求先有命中。
+- **动态刷新**：流式中 1 秒节奏刷新——tok/s 为 4s 滑动窗口即时速度；基于回答文本的 token 估算（CJK 1 字≈1 token、其余 4 字符≈1 token）。`usage.delta` 精确值随每次模型请求完成到达即覆盖估算；轮结束后为精确值（精确输出 ÷ 首块→末次 usage 的解码窗口）。
+- **静默期保持**：工具执行期间文本停止增长，速度保持最近值不消失；点停止/出错时该次请求不报 usage，输出估算以内容兜底、速度保持最近值——已产生的数据不凭空消失。
 - **切换会话立即消失**：渲染只认「DOM 可见轮次（`section[data-turn-id]`）+ `data-session-id` 匹配当前会话」双重条件，不依赖任何会话切换事件；多会话并行时各 tab 互不干扰。
 - **历史会话累计缺失**：usage.delta 不回放，重新打开旧会话拿不到当时的 token 统计，属预期。
 - **无假时钟**：不显示时间段，绝不拿当前时间冒充轮次时间。
-- **空会话常驻**：当前会话无任何轮次（新会话/未对话）时显示仅绿点的空态胶囊，进入对话后自然切换为完整指标。
+- **空会话常驻**：当前会话无任何轮次（新会话/未对话）时显示仅绿点的空态胶囊，今日有消耗则附带 `总耗 xx`，进入对话后自然切换为完整指标。今日值经 `window.__ztpsDaily.readToday()` / `localStorage["ztps-daily-v1"]` 可查。
 
 ### 位置切换（胶囊右键）
 
@@ -495,7 +496,7 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 2. 会话协议帧为二进制（Uint8Array）内嵌 JSON（自首个 `{` 起），两类：
    - **version:1 事件流**（顶层带 sessionId/sourceCommandId/occurredAt）：`usage.delta`（inputTokens/outputTokens/cacheReadTokens/totalTokens/reasoningTokens，**每次模型请求完成时发**——一轮含工具调用会有多条，out 为该次请求输出）、`stream.chunk`（`assistantMessageId` + `chunkLength` + `channel`，流式期间每 50-100ms 一批）
    - **conversation 行事件**（`frame.payload.deltas`/`events`）：`turnHeader`（startedAt/endedAt/state）、`userInput`（createdAt）、`reasoning`/`assistantText`（`text` 全量 + `assistantResponseId`）、`row.delta`（`{rowId, path:"text", append:"文本增量"}`）
-3. **轮关联链**（事件里的 id 有两套，务必分清）：轮的 key 是 productTurnId（`msg_xxx`，与 DOM `section[data-turn-id]` 一致）；stream.chunk 的 `assistantMessageId` 是 assistantResponseId（另一个 msg_xxx），需经行事件的 `assistantResponseId → turnId` 映射中转；usage.delta 经 `sourceCommandId` 关联（turnHeader/userInput 行携带）。关联断了的表现：out/tok/s 一直不出现。
+3. **轮关联链**（事件里的 id 有两套，务必分清）：轮的 key 是 productTurnId（`msg_xxx`，与 DOM `section[data-turn-id]` 一致）；stream.chunk 的 `assistantMessageId` 是 assistantResponseId（另一个 msg_xxx），需经行事件的 `assistantResponseId → turnId` 映射中转；usage.delta 经 `sourceCommandId` 关联（turnHeader/userInput 行携带）。关联断了的表现：会话累计（输入/输出）与 tok/s 一直不出现（今日总耗不受影响，它在轮关联之前独立累加）。
 4. 渲染：扫描 `section[data-turn-id]` + sessionId 双条件取当前会话最新轮 → 算指标 → 更新胶囊。
 5. 刷新机制：MutationObserver 回调里 16ms 节流的**同步**刷新（切换会话零残留）＋ 60ms 防抖全量扫 ＋ 1s 估算刷新节奏；渲染带内容签名（stamp/ttft/tps/out/streaming），数据未变零 DOM 写，保证同步刷新不触发 observer 自激。
 
@@ -517,7 +518,7 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 | 升级后胶囊消失 | app.asar 被覆盖，重跑 `--tps-footer`（注入源默认 skill 自带 zcode-tps.js） |
 | 重启后无胶囊 | `--tps-footer --check` 看 state；渲染进程 console 查 `window.__ztps` 是否存在 |
 | console 出现 CSP 拦截报错 | 当前版本 index.html 无 CSP；若未来版本加了，需同步放宽 `script-src` 允许同目录脚本 |
-| 指标一直只有「● 时间」 | usage.delta 未关联到轮（看 `window.__ztpsTurns` 里轮的 out/lastUsageAt 是否为空）；版本升级导致帧结构变化时，用 `window.__ztpsPort` 旁路监听原始帧比对字段 |
+| 指标一直只有「●」/「● 总耗」 | usage.delta 未关联到轮（看 `window.__ztpsTurns` 里轮的 outputTokens/inputTokens/lastUsageAt 是否为空）；版本升级导致帧结构变化时，用 `window.__ztpsPort` 旁路监听原始帧比对字段 |
 | tok/s 不出现 | 该轮从未有过文本流（纯工具调用轮）时无速度可算，属预期；有文本流后静默期（工具执行）保持最近值 |
 | 想换脚本逻辑 | 改 zcode-tps.js 后重跑 `--tps-footer`（内容变了会自动热更新脚本条目，无需 revert） |
 

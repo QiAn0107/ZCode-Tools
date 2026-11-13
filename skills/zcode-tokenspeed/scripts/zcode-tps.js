@@ -1,12 +1,12 @@
 /**
  * ZCode 状态栏：TPS 统计胶囊 —— 事件流实现（唯一方案）
  * ==================================================
- * 输入框工具栏常驻胶囊：● 时间 · 首 token · tok/s · out（当前会话最近一轮）
+ * 输入框工具栏常驻胶囊：● 首 token · tok/s │ 输入 · 输出 · 平均命中 │ 总耗(今日)
  *
  * 数据源（ZCode 主进程经 window.postMessage 转交的 ServicePort 事件流）：
  *   - version:1 事件流：usage.delta（真实 outputTokens/inputTokens）、stream.chunk
  *   - conversation 行事件：turnHeader / userInput / reasoning / assistantText / row.delta
- * 由此得到精确的 tok/s（4s 滑动窗口）、首 token 延迟、out（本轮累计输出）。
+ * 由此得到精确的 tok/s（4s 滑动窗口）、首 token 延迟、会话累计与今日总耗。
  *
  * ⚠️ 关键约束：**绝不调用 port.start()**
  *   MessagePort 队列一旦启用，消息只派发给"启用瞬间已注册的监听器"。本脚本是普通
@@ -50,6 +50,80 @@
     } catch (err) { return "composer-below"; }
   };
   const setPos = (id) => { try { localStorage.setItem(POS_KEY, id); } catch (err) { /* 静默 */ } };
+
+  // ---------- 今日统计(按本地日期聚合 usage.delta 精确值,localStorage 持久化) ----------
+  // 口径:今日总耗 = Σ(inputTokens + outputTokens),只计 usage.delta 精确值,不含流式估算。
+  // 限制:仅补丁运行期间捕获(ZCode 未运行时/历史消耗不计);清 localStorage 即清零。
+  const DAILY_KEY = "ztps-daily-v1";
+  const DAILY_KEEP = 30;      // 保留近 30 天
+  const DAILY_SEEN_CAP = 500; // 去重环上限
+  // 本地时区 YYYY-MM-DD(跨午夜按 occurredAt 分桶)
+  const dayKeyOf = (ts) => {
+    const d = new Date(ts);
+    return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+  };
+  const loadDaily = () => {
+    try {
+      const raw = localStorage.getItem(DAILY_KEY);
+      if (!raw) return { days: {}, seen: [] };
+      const j = JSON.parse(raw);
+      if (!j || typeof j !== "object" || !j.days || typeof j.days !== "object") return { days: {}, seen: [] };
+      return { days: j.days, seen: Array.isArray(j.seen) ? j.seen : [] };
+    } catch (err) { return { days: {}, seen: [] }; }
+  };
+  const saveDaily = (st) => {
+    try {
+      const keys = Object.keys(st.days).sort();
+      while (keys.length > DAILY_KEEP) delete st.days[keys.shift()];
+      if (st.seen.length > DAILY_SEEN_CAP) st.seen = st.seen.slice(st.seen.length - DAILY_SEEN_CAP);
+      localStorage.setItem(DAILY_KEY, JSON.stringify(st));
+    } catch (err) { /* 静默:隐私模式等写失败时退回内存兜底 */ }
+  };
+  // localStorage 不可用时的当次内存兜底 {key, total}
+  let memToday = { key: dayKeyOf(Date.now()), total: 0 };
+  // 幂等累加一条 usage.delta;返回当日累计值
+  const addDaily = (ev) => {
+    const i = ev.inputTokens || 0, o = ev.outputTokens || 0;
+    if (i <= 0 && o <= 0) return readToday().total;
+    const key = dayKeyOf(ev.occurredAt ?? Date.now());
+    const id = [ev.sourceCommandId, ev.occurredAt, i, o, ev.modelId].join("|");
+    const st = loadDaily();
+    if (st.seen.indexOf(id) >= 0) {
+      const b = st.days[key];
+      const tot = b ? (b.i || 0) + (b.o || 0) : 0;
+      return tot > 0 ? tot : memTodayTotal(key);
+    }
+    st.seen.push(id);
+    const b = st.days[key] || (st.days[key] = { i: 0, o: 0, n: 0, u: 0 });
+    b.i += i; b.o += o; b.n += 1; b.u = Date.now();
+    saveDaily(st);
+    if (memToday.key === key) memToday.total = Math.max(memToday.total, b.i + b.o);
+    else { memToday.key = key; memToday.total = b.i + b.o; }
+    return b.i + b.o;
+  };
+  const memTodayTotal = (key) => (memToday.key === key ? memToday.total : 0);
+  // 读侧缓存:localStorage 字符串不变则零解析
+  let _dailyCache = { raw: null, key: null, total: 0 };
+  const readToday = () => {
+    const key = dayKeyOf(Date.now());
+    try {
+      const raw = localStorage.getItem(DAILY_KEY);
+      if (raw === _dailyCache.raw && _dailyCache.key === key) return { key, total: _dailyCache.total };
+      _dailyCache.raw = raw;
+      _dailyCache.key = key;
+      if (!raw) { _dailyCache.total = memTodayTotal(key); return { key, total: _dailyCache.total }; }
+      const j = JSON.parse(raw);
+      const b = j && j.days && j.days[key];
+      _dailyCache.total = Math.max(b ? (b.i || 0) + (b.o || 0) : 0, memTodayTotal(key));
+      return { key, total: _dailyCache.total };
+    } catch (err) { return { key, total: memTodayTotal(key) }; }
+  };
+  // 跨 tab 同步:别的窗口写入后刷新读缓存并重绘
+  try {
+    window.addEventListener("storage", (e) => {
+      if (e && e.key === DAILY_KEY) { _dailyCache.raw = undefined; scheduleScan(); }
+    });
+  } catch (err) { /* 静默 */ }
 
   // ---------- 侧边栏/辅助对话与主会话边界判定 ----------
   // 核心诉求：无论何时只挂载在主界面对话框，绝不在侧边栏（辅助对话）来回跳动。
@@ -278,6 +352,7 @@
     const scid = ev.sourceCommandId;
     if (ev.kind === "usage.delta") {
       if (!scid) return;
+      addDaily(ev);   // 今日总耗:与轮关联无关,每条精确用量都计入(幂等去重)
       const t = findByScid(scid) || turns.get(scidTurn.get(scid));
       if (!t) return;
       t.outputTokens += ev.outputTokens || 0;
@@ -534,7 +609,7 @@
   let diag = null;
   try {
     diag = window.__ztpsDiag = window.__ztpsDiag || {};
-    diag.scriptVersion = "3.14-pos";
+    diag.scriptVersion = "3.15-daily";
     diag.loadedAt = new Date().toISOString();
   } catch (err) { /* ignore */ }
 
@@ -656,12 +731,16 @@
         if (!latest || (t.startedAt ?? 0) > (latest.startedAt ?? 0)) latest = t;
       }
       let host = document.querySelector("[" + MARK + "-bar]");
+      // 今日总耗(全局口径:含所有会话/侧边栏,以 Σ(input+output) 精确值计)
+      const today = readToday();
       if (diag) {
         diag.domSessionId = domSess;
         diag.visibleTurns = visible.size;
         diag.turnStats = turns.size;
         diag.latestFound = !!latest;
         diag.posMode = mode;
+        diag.todayKey = today.key;
+        diag.todayTotal = today.total;
         if (latest) {
           diag.latest = {
             msgId: latest.msgId, sessionId: latest.sessionId,
@@ -703,9 +782,10 @@
       }
       const pill = host.firstChild;
       if (!hasData) {
-        // 空态:只显示空闲绿点;右键切位置等交互照常
-        if (pill._zkey !== "empty") {
-          pill._zkey = "empty";
+        // 空态:仅绿点,今日有消耗则附带总耗;右键切位置等交互照常
+        const ekey = "empty|" + today.key + "|" + today.total;
+        if (pill._zkey !== ekey) {
+          pill._zkey = ekey;
           pill._zsegs = [];
           pill.style.background = "rgba(127,127,127,0.08)";
           pill.style.padding = "0 10px";
@@ -714,13 +794,27 @@
           dot.textContent = "●";
           dot.style.color = "#4ade80";
           pill.appendChild(dot);
+          if (today.total > 0) {
+            const sep = document.createElement("span");
+            sep.textContent = "│";
+            sep.style.opacity = "0.45";
+            pill.appendChild(sep);
+            const lab = document.createElement("span");
+            lab.textContent = "总耗 ";
+            pill.appendChild(lab);
+            const val = document.createElement("span");
+            val.textContent = fmtTok(today.total);
+            val.style.color = "var(--color-foreground, var(--ztps-fg, #1b1f24))";
+            pill.appendChild(val);
+          }
         }
         return;
       }
       const s = statsOf(latest);
       // 内容签名:未变化时完全跳过 DOM 写入与排版回流，达到零开销
       const key = [s.stamp, s.ttft, s.tps, s.out, s.reasoning, s.streaming,
-                   agg.rounds, agg.input, agg.cache, agg.cacheWrite, agg.reasoning, agg.output].join("|");
+                   agg.rounds, agg.input, agg.cache, agg.cacheWrite, agg.reasoning, agg.output,
+                   today.key, today.total].join("|");
       let segs = pill._zsegs;
       if (pill._zkey !== key) {
         pill._zkey = key;
@@ -742,28 +836,18 @@
         dot.style.color = "#4ade80";
         if (s.streaming) dot.style.textShadow = "0 0 6px rgba(74,222,128,.8)";
         pill.appendChild(dot);
-        // 段布局:本轮即时指标(g0:首 token/tok/s/思考)+ 会话累计(g1:轮/总用/输入/命中+命中率/累思/累出)。
+        // 段布局:即时指标(g0:首 token/tok/s)+ 会话累计(g1:输入/输出/平均命中)+ 今日总耗(g2:总耗)。
         // 组间用竖线分隔,组内用 · ;不显示时间(用户不需要)
         segs = [];
         if (s.ttft != null && s.ttft >= 0) segs.push({ p: 1, g: 0, nodes: [span("首 token "), span(fmtLat(s.ttft), "VALUE")] });
         if (s.tps != null) segs.push({ p: 2, g: 0, nodes: [span(fmtTps(s.tps) + " tok/s", "ACCENT")] });
-        if (s.reasoning > 0) segs.push({ p: 2.5, g: 0, nodes: [span("思考 "), span(fmtTok(s.reasoning), "ACCENT")] });
-        if (agg.rounds > 0) segs.push({ p: 4, g: 1, nodes: [span("第 " + agg.rounds + " 轮")] });
-        const totalTok = (agg.input || 0) + (agg.output || 0);
-        if (totalTok > 0) segs.push({ p: 3, g: 1, nodes: [span("总用 "), span(fmtTok(totalTok), "VALUE")] });
+        if (agg.input > 0) segs.push({ p: 5, g: 1, nodes: [span("输入 "), span(fmtTok(agg.input), "VALUE")] });
+        if (agg.output > 0) segs.push({ p: 6, g: 1, nodes: [span("输出 "), span(fmtTok(agg.output), "VALUE")] });
         if (agg.input > 0) {
-          const nodes = [span("输入 "), span(fmtTok(agg.input), "VALUE")];
-          if (agg.cache > 0) {
-            nodes.push(span("命中 " + fmtTok(agg.cache), "VALUE"));
-            const pct = agg.input > 0 ? (agg.cache / agg.input) * 100 : 0;
-            if (pct > 0) nodes.push(span(" 平均命中 " + fmtPct(pct) + "%", "ACCENT"));
-          }
-          segs.push({ p: 5, g: 1, nodes });
+          const pct = (agg.cache / agg.input) * 100;
+          segs.push({ p: 5.6, g: 1, nodes: [span(" 平均命中 " + fmtPct(pct) + "%", "ACCENT")] });
         }
-        if (agg.reasoning > 0 && !(s.reasoning > 0)) {
-          segs.push({ p: 5.5, g: 1, nodes: [span("累思 "), span(fmtTok(agg.reasoning), "VALUE")] });
-        }
-        if (agg.output > 0) segs.push({ p: 6, g: 1, nodes: [span("累出 "), span(fmtTok(agg.output), "VALUE")] });
+        if (today.total > 0) segs.push({ p: 7, g: 2, nodes: [span("总耗 "), span(fmtTok(today.total), "VALUE")] });
         segs.forEach((g, i) => {
           if (i > 0) {
             const cross = segs[i - 1].g !== g.g;   // 跨组:竖线分隔,更醒目
@@ -779,7 +863,7 @@
         try {
           requestAnimationFrame(() => {
             try {
-              for (const drop of [3, 1, 2]) {
+              for (const drop of [7, 1, 2]) {
                 if (pill.scrollWidth <= pill.clientWidth + 1) break;
                 const g = segs.find((x) => x.p === drop);
                 if (!g) continue;
@@ -888,6 +972,7 @@
   }, true);
 
   window.__ztpsTurns = turns;
+  window.__ztpsDaily = { readToday, loadDaily, dayKeyOf };   // 调试用:查今日统计
   window.__ztpsHook = hookPort;   // 调试用：热注入时可对存量端口手动补挂
   // 自检：加载 5s 后若仍未接管端口，把诊断信息打到 console（便于版本升级后排障）
   setTimeout(() => {

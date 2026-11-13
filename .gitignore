@@ -45,6 +45,8 @@ apply_after_exit.log
 .workbuddy-ai/
 .box-agent/
 .box-agent-scratch/
+.zcode/
+ci-report.md
 NVIDIA Corporation/
 
 # 本地视觉验收夹具与截图（临时验证产物，不入库）

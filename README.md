@@ -1,7 +1,7 @@
 # zcode-tokenspeed · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/c80361619/zcode-toolkit/releases"><img src="https://img.shields.io/badge/version-0.6.23-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/c80361619/zcode-toolkit/releases"><img src="https://img.shields.io/badge/version-0.6.24-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -9,7 +9,7 @@
 </p>
 
 为 ZCode 桌面客户端补齐极致原生体验与生产力增强：
-- 📊 **实时 TPS 与性能状态栏**：首 Token 延迟、tok/s 生成速度、Token 统计与会话命中率常驻展示。
+- 📊 **实时 TPS 与性能状态栏**：首 Token 延迟、tok/s 生成速度、会话输入/输出与平均命中率、今日总耗常驻展示。
 - ✨ **提示词智能增强**：输入框旁一键重写润色草稿；**右键自由选择**润色所用模型，支持一键恢复。
 - 📈 **用量图表全量展开**：破除官方 Top 5/6 截断限制，全量展示所有模型的调用趋势与占比。
 - ⚡ **设置页模型自动拉取**：设置页一键获取供应商可用模型，批量同步写入配置。
@@ -44,7 +44,7 @@
 | 特性 | 功能名称 | 核心效果 | 改动范围 |
 |:---:|:---|:---|:---|
 | 🛡️ | **升级自动自愈** | 动态监控客户端与插件版本，升级后自动感知并调度看护静默修复 | 状态监控器 |
-| 📊 | **实时 TPS 状态栏** | 输入框常驻：本轮指标（首 token / tok/s / out）+ 会话累计，右键自由切换位置 | `app.asar` 注入脚本 |
+| 📊 | **实时 TPS 状态栏** | 输入框常驻：即时指标（首 token / tok/s）+ 会话累计（输入 / 输出 / 平均命中）+ 今日总耗，右键自由切换位置 | `app.asar` 注入脚本 |
 | ✨ | **提示词增强润色** | 输入框旁「增强提示词」按钮，右键支持按供应商自选润色模型，持久化且免重启 | `app.asar` 注入脚本 + IPC |
 | 📈 | **用量图表去截断** | 「设置 → 用量」趋势图与饼图不再被 Top 5 / Top 6 截断，全量展示所有模型 | `app.asar` 渲染层 |
 | ⚡ | **设置页模型拉取** | 设置页新增「⚡ 自动拉取模型」按钮，自动从供应商同步可用模型并批量写入 | `app.asar` 注入脚本 + IPC |
@@ -151,6 +151,11 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.24（TPS 状态栏改版：会话输入/输出/平均命中 + 今日总耗）
+- **累计区重构**：删除第 N 轮、总用、命中绝对值、累思与思考显示，会话累计精简为 `输入 xx · 输出 xx · 平均命中 xx%`（输入>0 即显示，含 `0.00%`）；
+- **新增今日总耗**：`总耗 xx` 显示今日 Σ(input+output) 精确值，按 `occurredAt` 本地日期分桶存 `localStorage`（保留 30 天，重复事件幂等去重），空会话也常驻显示；仅补丁运行期间捕获；
+- **测试**：新增 `tests/tps_daily_smoke.js`（分桶/去重/裁剪/容错），更新百分比冒烟与回归断言。
 
 #### 0.6.16（解决思考档位关闭导致退出无限重启死循环，Issue #5）
 - **语义修正为“不托管”**：3.14+ 思考档位配置目标为客户端自带的 `provider_config.json`；当开关关闭时语义明确为“停止托管与同步”，插件不再主动写入，且绝不主动还原该文件，彻底切断“退出还原 → 客户端重启写回 → 再次检测冲突 → 再次看护还原”的无限死循环；
