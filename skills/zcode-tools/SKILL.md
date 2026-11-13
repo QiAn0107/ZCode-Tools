@@ -1,11 +1,11 @@
 ---
-name: zcode-tokenspeed
-description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁注入工具：①用量页去截断（趋势图/饼图全量）②模型弹窗加宽 ③TPS 状态栏（输入框统计条：本轮指标+会话累计）④增强提示词按钮（一键润色输入框草稿，右键可选润色所用模型）⑤设置页一键模型拉取按钮。全部幂等、可 --check、可 --revert 精确还原。只有当用户明确要求执行本 skill、或明确点名「zcode-tokenspeed」时才加载；用户只是泛泛提到用量图、状态栏、补丁等话题时，一律不要自动触发本 skill。"
+name: zcode-tools
+description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁注入工具：①用量页去截断（趋势图/饼图全量）②模型弹窗加宽 ③TPS 状态栏（输入框统计条：本轮指标+会话累计）④增强提示词按钮（一键润色输入框草稿，右键可选润色所用模型）⑤设置页一键模型拉取按钮。全部幂等、可 --check、可 --revert 精确还原。只有当用户明确要求执行本 skill、或明确点名「zcode-tools」时才加载；用户只是泛泛提到用量图、状态栏、补丁等话题时，一律不要自动触发本 skill。"
 ---
 
 # ZCode 客户端补丁工具
 
-> 本 skill 由 **zcode-tokenspeed 插件**提供，脚本就在本 skill 目录下的 `scripts/`（下文所有 `<skill目录>` 均指本目录）。
+> 本 skill 由 **zcode-tools 插件**提供，脚本就在本 skill 目录下的 `scripts/`（下文所有 `<skill目录>` 均指本目录）。
 
 **先跑这一条**（只读，不改任何文件，一条命令看全部 5 项功能的状态）：
 
@@ -26,7 +26,7 @@ python "<skill目录>/scripts/doctor.py" --where  # 只查「插件装在哪」+
 ```
 
 > **别站在插件的缓存目录里敲相对路径**——用户最常踩的坑，报错长这样：
-> `can't open file '...\.zcode\cli\plugins\cache\zcode-toolkit\skills\...\doctor.py'`。
+> `can't open file '...\.zcode\cli\plugins\cache\zcode-tools\skills\...\doctor.py'`。
 > `cache\<市场名>\` 是**市场目录**，插件根在更深一层：GitHub 来源的市场缓存成
 > **`cache\<市场名>\<插件名>\<版本>\`**，`skills\` 在**版本目录里面**。
 > 找不到时：`--where` 列命中路径；或用系统命令搜
@@ -123,7 +123,7 @@ python "<skill目录>/scripts/doctor.py" --where  # 只查「插件装在哪」+
   - `<数据>/cli/plugins/cache/<市场名>/<插件名>/<版本>/` —— GitHub/URL 来源，**插件根在版本目录里**
     （实测 `cache/zcode-plugins-official/computer-use/0.5.13/.zcode-plugin/plugin.json`）
   - `<数据>/cli/plugins/cache/<市场名>/plugins/<插件名>/` —— 市场仓库里带 `plugins/` 子目录时
-  - **缓存会堆积多个历史版本**（本机 `cache/zcode-toolkit/zcode-tokenspeed/` 下有 0.3.1、0.5.x 等，
+  - **缓存会堆积多个历史版本**（本机 `cache/zcode-tools/zcode-tools/` 下有 0.3.1、0.5.x 等，
     更早还有 `dev-default-22da16fd/zcode-patcher/` 的 0.1.0/0.1.1/0.2.0/0.2.1），
     所以自检会报出全部命中项并按 mtime 提示最新的那份。
 - **配置键格式是 `<插件名>@<市场名>`**（实测 `computer-use@zcode-plugins-official`）——
@@ -177,11 +177,11 @@ python "<skill目录>/scripts/doctor.py" --where  # 只查「插件装在哪」+
 
 > **如果详情页「高级信息」里没有出现「配置」区**：这是 ZCode 侧的渲染问题，与插件清单无关——界面拿到的插件信息里 `userConfig` 为空时，配置区整个不渲染（`Y2t` 组件里 `userConfig` 为空直接 `return null`）。清单本身是正确的（Agent 侧 `M5s` 完整解析、`f5s` 赋 `userConfig: e.manifest.userConfig`、`jGo` 条件展开，链路已逐环节核对）。此时**直接写配置文件**，效果完全一样：
 >
-> `~/.zcode/cli/config.json` → `plugins.options["zcode-tokenspeed@<市场名>"]`（`@` 后面按实际安装的市场填；本机是 `zcode-toolkit`）：
+> `~/.zcode/cli/config.json` → `plugins.options["zcode-tools@<市场名>"]`（`@` 后面按实际安装的市场填；本机是 `zcode-tools`）：
 > ```json
 > "plugins": {
 >   "options": {
->     "zcode-tokenspeed@zcode-toolkit": { "tps_footer": false, "model_puller": true }
+>     "zcode-tools@zcode-tools": { "tps_footer": false, "model_puller": true }
 >   }
 > }
 > ```
@@ -297,7 +297,7 @@ python autopilot.py --max-retries 5                  # 提高可恢复错误的�
 不要说成「已完成」，否则用户会以为补丁没起作用。
 
 > 想让改动**立刻**生效（不想等下次退出）：请用户完全退出 ZCode，然后前台跑
-> `python "<插件目录>/skills/zcode-tokenspeed/scripts/sync.py"`（结论打终端 + `_sync.log`）。
+> `python "<插件目录>/skills/zcode-tools/scripts/sync.py"`（结论打终端 + `_sync.log`）。
 > 沙箱/工具进程**无法**起脱离进程，所以这件事只能请用户做。
 
 ### 错误处理：重试与否只看类别，不看「是否致命」

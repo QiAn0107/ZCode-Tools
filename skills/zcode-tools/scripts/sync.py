@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""zcode-tokenspeed 插件开关同步（由 SessionStart hook 调用）
+"""zcode-tools 插件开关同步（由 SessionStart hook 调用）
 
 把客户端补丁同步到期望状态：
   字节级补丁（用量图表 / 弹窗加宽 / 档位配置）—— 立即写入，下次启动可见
@@ -45,7 +45,7 @@ WATCHDOG = HERE / "apply_after_exit.py"
 CONFIG = Path.home() / ".zcode" / "cli" / "config.json"
 # 插件 id 会随安装方式变化（本地 dev-default-xxxx、市场安装的 id 等），
 # 因此按前缀匹配而不是写死某个 id —— 换台机器/换安装方式也能正确定位配置。
-PLUGIN_ID_PREFIX = "zcode-tokenspeed"
+PLUGIN_ID_PREFIX = "zcode-tools"
 LOG = HERE / "_sync.log"
 # 「钩子到底跑没跑」的心跳文件：每次被调用都刷新一次时间戳。
 # 为什么需要它：没拨过开关时 sync 什么也不做、日志也是空的，「钩子没触发」与
@@ -121,8 +121,8 @@ def spawn_detached(extra_args: list) -> bool:
 def _is_our_key(key) -> bool:
     """这个配置键是不是本插件的？
 
-    ⚠️ 不能用裸 `startswith("zcode-tokenspeed")`：那会把 **别的插件** 的配置也命中 ——
-    `zcode-tokenspeed-extra`、`zcode-tokenspeed-pro`、`zcode-tokenspeed-lite` 之类
+    ⚠️ 不能用裸 `startswith("zcode-tools")`：那会把 **别的插件** 的配置也命中 ——
+    `zcode-tools-extra`、`zcode-tools-pro`、`zcode-tools-lite` 之类
     同前缀插件一旦同时安装，`_search()` 会先撞上谁取决于 dict 插入顺序，
     表现为「开关莫名串台」（甚至把别人的配置当自己的开关去注入/还原）。
 
@@ -516,7 +516,7 @@ def run_sync(echo: bool = False) -> str:
                else f"所有开关都已与客户端一致（来源：{origin}），无需改动")
     log(f"同步结果（来源：{origin}）—— {summary}")
     if echo:
-        print(f"[zcode-tokenspeed] {summary}")
+        print(f"[zcode-tools] {summary}")
     return summary
 
 
@@ -596,7 +596,7 @@ def first_auto_inject() -> bool:
         return False
 
 
-NOTICE_HEAD = "ZCode Patcher 已自动接管本地补丁注入（无需手动配置）"
+NOTICE_HEAD = "ZCode-Tools 已自动接管本地补丁注入（无需手动配置）"
 
 
 def build_notice(is_upgrade: bool = False, version: str = "") -> str:

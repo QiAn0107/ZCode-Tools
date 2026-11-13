@@ -1,5 +1,5 @@
 @echo off
-rem zcode-toolkit one-click entry point for Windows.
+rem ZCode-Tools one-click entry point for Windows.
 rem
 rem Finds a usable Python and forwards all arguments to autopilot.py.
 rem

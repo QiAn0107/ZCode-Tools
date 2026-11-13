@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-r"""zcode-tokenspeed 安装自检（doctor）——只读，不改任何文件。
+r"""zcode-tools 安装自检（doctor）——只读，不改任何文件。
 
 用途：在「插件装了但功能没生效」时，一条命令跑出完整链路诊断：
 
@@ -10,8 +10,8 @@ r"""zcode-tokenspeed 安装自检（doctor）——只读，不改任何文件�
 
 ⚠️ 相对路径是相对**当前所在目录**解析的。请在**克隆下来的仓库**里跑，
    或者用绝对路径：
-       python "%USERPROFILE%\zcode-toolkit\skills\zcode-tokenspeed\scripts\doctor.py"
-   （macOS / Linux：`python3 ~/zcode-toolkit/skills/zcode-tokenspeed/scripts/doctor.py`）
+       python "%USERPROFILE%\zcode-tools\skills\zcode-tools\scripts\doctor.py"
+   （macOS / Linux：`python3 ~/zcode-tools/skills/zcode-tools/scripts/doctor.py`）
    若想直接跑**已安装的那份**，先 `doctor.py --where` 看命中路径 —— 注意 GitHub 来源
    的市场是 `cli/plugins/cache/<市场名>/<插件名>/<版本>/`，脚本在版本目录里面。
 
@@ -52,8 +52,9 @@ except ImportError:                    # 被别处 import 时脚本目录可能�
     sys.path.insert(0, str(HERE))
     from _console import no_window_kwargs, safe_stdio
 
-PLUGIN_NAME = "zcode-tokenspeed"
-REPO_NAME = "zcode-toolkit"
+PLUGIN_NAME = "zcode-tools"
+REPO_NAME = "zcode-tools"
+MARKET_SOURCE = "QiAn0107/ZCode-Tools"   # 「添加插件市场」里填的 GitHub 来源
 MIN_PY = (3, 10)
 
 PATCH_KEYS = [
@@ -197,7 +198,7 @@ def _prefix_entries(cfg, section: str) -> dict:
     """取 config.json 里 plugins.<section> 下属于本插件的条目。
 
     键的格式是 `<插件名>@<市场名>`（实测 `computer-use@zcode-plugins-official`）。
-    只认 `<插件名>@…`，不要用裸 startswith —— 否则 `zcode-tokenspeed-legacy@m`
+    只认 `<插件名>@…`，不要用裸 startswith —— 否则 `zcode-tools-legacy@m`
     这种别的插件会被误算进来。
     """
     block = ((cfg or {}).get("plugins") or {}).get(section) or {}
@@ -258,7 +259,7 @@ def print_where(verbose: bool = False) -> int:
         print("       脚本在**版本目录**里面 —— 站在 cache/<市场名> 这一层是找不到 skills/ 的。")
     else:
         print(f"\n{BAD} 没有任何候选目录的清单 name == {PLUGIN_NAME} —— 插件没装成功")
-        print(f"       → 「设置 → 插件 → 创建 → 添加插件市场」填 {REPO_NAME}，再点安装")
+        print(f"       → 「设置 → 插件 → 创建 → 添加插件市场」填 {MARKET_SOURCE}，再点安装")
 
     if verbose or not hits:
         label = "全部候选目录" if verbose else "扫过的候选目录（供你确认路径拼写）"
@@ -367,7 +368,7 @@ def check_plugin() -> tuple[bool, list[Path], bool]:
         print("       常见落点：")
         print("         <数据>/cli/plugins/cache/<市场名>/<插件名>/<版本>/    ← GitHub/URL 市场")
         print("         <数据>/cli/plugins/marketplaces/<市场 id>/            ← 本地目录市场")
-        print(f"       → 「设置 → 插件 → 创建 → 添加插件市场」添加 {REPO_NAME} 后安装")
+        print(f"       → 「设置 → 插件 → 创建 → 添加插件市场」添加 {MARKET_SOURCE} 后安装")
         print("       → 或直接跑 `doctor.py --where` 看它到底扫了哪些目录")
         return False, [], False
 
@@ -850,7 +851,7 @@ def auto_fix() -> int:
 
 def main() -> int:
     safe_stdio()          # 输出被重定向时 cp936 会编不出符号，先把这条路封死
-    ap = argparse.ArgumentParser(description="zcode-tokenspeed 安装自检（只读，或配合 --fix 自动修复）")
+    ap = argparse.ArgumentParser(description="zcode-tools 安装自检（只读，或配合 --fix 自动修复）")
     ap.add_argument("--json", action="store_true", help="以 JSON 输出（便于贴给别人看）")
     ap.add_argument("--where", action="store_true",
                     help="只打印扫描到的插件目录，排查「插件到底装在哪」")
@@ -891,7 +892,7 @@ def main() -> int:
         }, ensure_ascii=False, indent=2))
         return 0
 
-    print("zcode-tokenspeed 自检报告（只读，不会修改任何文件；加 --fix 可自动修复）")
+    print("zcode-tools 自检报告（只读，不会修改任何文件；加 --fix 可自动修复）")
     py_ok = check_python()
     zcode_ok, _, _ = check_zcode()
     check_running()

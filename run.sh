@@ -1,5 +1,5 @@
 #!/bin/sh
-# zcode-toolkit 一键入口（macOS / Linux / Git Bash）
+# ZCode-Tools 一键入口（macOS / Linux / Git Bash）
 #
 # 作用：找到可用的 Python，把参数原样转交给 autopilot.py。
 # 用法：

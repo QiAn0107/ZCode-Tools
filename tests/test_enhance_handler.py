@@ -55,7 +55,7 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 for _cand in (_HERE.parent / "scripts",
-              _HERE.parent / "skills" / "zcode-tokenspeed" / "scripts"):
+              _HERE.parent / "skills" / "zcode-tools" / "scripts"):
     if (_cand / "zcode_patcher.py").is_file():
         sys.path.insert(0, str(_cand))
         break
@@ -806,7 +806,7 @@ class TestEnhanceScriptDockAnchoring(unittest.TestCase):
     def setUpClass(cls):
         cls.script = None
         for cand in (_HERE.parent / "scripts",
-                     _HERE.parent / "skills" / "zcode-tokenspeed" / "scripts"):
+                     _HERE.parent / "skills" / "zcode-tools" / "scripts"):
             p = cand / "zcode-enhance-prompt.js"
             if p.is_file():
                 cls.script = p
@@ -856,7 +856,7 @@ class TestDoctorMirrorsHandler(unittest.TestCase):
     def setUpClass(cls):
         path = None
         for cand in (_HERE.parent / "scripts",
-                     _HERE.parent / "skills" / "zcode-tokenspeed" / "scripts"):
+                     _HERE.parent / "skills" / "zcode-tools" / "scripts"):
             p = cand / "enhance_doctor.py"
             if p.is_file():
                 path = p

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""zcode-toolkit 全自动流水线（Windows / macOS / Linux）
+"""zcode-tools 全自动流水线（Windows / macOS / Linux）
 
 一条命令、零人工干预地跑完：
     环境自检 → 自动安装依赖 → 自动构建 → 自动测试 → 自动部署 → 验证 → 汇总报告
@@ -56,7 +56,7 @@ from pathlib import Path
 # --------------------------------------------------------------------------- #
 
 HERE = Path(__file__).resolve().parent           # 仓库根 = 本脚本所在目录
-SCRIPTS = HERE / "skills" / "zcode-tokenspeed" / "scripts"
+SCRIPTS = HERE / "skills" / "zcode-tools" / "scripts"
 TESTS = HERE / "tests"
 LOGDIR = HERE / "logs"
 
@@ -924,7 +924,7 @@ def build_summary(results: list[StepResult], *, elapsed: float,
     """生成人读的汇总报告。失败时这份内容会同时落到 stdout 与日志文件。"""
     lines: list[str] = []
     lines.append("=" * 68)
-    lines.append(f"zcode-toolkit 自动化流水线 · 汇总（耗时 {elapsed:.1f}s）")
+    lines.append(f"zcode-tools 自动化流水线 · 汇总（耗时 {elapsed:.1f}s）")
     lines.append("=" * 68)
 
     icon = {"ok": "[+]", "warned": "[!]", "skipped": "[-]", "failed": "[x]", "pending": "[ ]"}
@@ -1018,7 +1018,7 @@ def _exit_code_for(result: StepResult) -> int:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="autopilot.py",
-        description="zcode-toolkit 全自动流水线：环境自检 → 自动装依赖 → 构建 → 测试 → 部署 → 验证",
+        description="zcode-tools 全自动流水线：环境自检 → 自动装依赖 → 构建 → 测试 → 部署 → 验证",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="示例：\n"
                "  python autopilot.py                     # 全自动（含部署）\n"
@@ -1085,7 +1085,7 @@ def main() -> int:
                  verbose=args.verbose, echo=not args.quiet)
 
     started = time.time()
-    log.info("zcode-toolkit 全自动流水线")
+    log.info("zcode-tools 全自动流水线")
     log.info(f"步骤：{' → '.join(f'{s}({STEP_TITLES[s]})' for s in steps)}")
     log.info(f"模式：{'dry-run（不写盘）' if args.dry_run else '实际执行'}"
              + ("，无人值守" if args.unattended else "")

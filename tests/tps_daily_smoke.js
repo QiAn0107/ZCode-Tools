@@ -6,14 +6,14 @@
 //      验证跨午夜分桶、重复事件去重、30 天裁剪、损坏 JSON 容错；
 //   ③ 读侧：renderBar 必须经 readToday 取今日值，空态也要带总耗。
 //
-// 用法：node tests/tps_daily_smoke.js skills/zcode-tokenspeed/scripts/zcode-tps.js
+// 用法：node tests/tps_daily_smoke.js skills/zcode-tools/scripts/zcode-tps.js
 // 退出码 0 = 通过；1 = 有断言失败；2 = 用法/读取错误。
 const fs = require("fs");
 
 const target = process.argv[2];
 if (!target) {
   console.error("用法：node tests/tps_daily_smoke.js <zcode-tps.js 的路径>");
-  console.error("例如：node tests/tps_daily_smoke.js skills/zcode-tokenspeed/scripts/zcode-tps.js");
+  console.error("例如：node tests/tps_daily_smoke.js skills/zcode-tools/scripts/zcode-tps.js");
   process.exit(2);
 }
 let src;

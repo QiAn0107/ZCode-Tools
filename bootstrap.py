@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""zcode-toolkit 跨平台引导脚本（Windows / macOS / Linux）
+"""zcode-tools 跨平台引导脚本（Windows / macOS / Linux）
 
 一条命令完成：环境自检 → 依赖检查 → 语法构建校验 → 回归测试 → 启动。
 
@@ -40,7 +40,7 @@ from pathlib import Path
 # --------------------------------------------------------------------------- #
 
 HERE = Path(__file__).resolve().parent          # 仓库根 = 本脚本所在目录
-SCRIPTS = HERE / "skills" / "zcode-tokenspeed" / "scripts"
+SCRIPTS = HERE / "skills" / "zcode-tools" / "scripts"
 TESTS = HERE / "tests"
 
 try:
@@ -333,7 +333,7 @@ def step_env(args) -> None:
     if not SCRIPTS.is_dir():
         die(f"找不到脚本目录：{SCRIPTS}\n    "
             f"请确认本脚本位于仓库根目录（与 skills/ 同级）。")
-    ok("脚本目录结构完整（skills/zcode-tokenspeed/scripts）")
+    ok("脚本目录结构完整（skills/zcode-tools/scripts）")
 
     if os.name != "nt" and hasattr(os, "geteuid") and os.geteuid() == 0:
         warn("当前以 root 运行。打补丁本身不需要 root，"
@@ -379,7 +379,7 @@ def step_install(args) -> None:
         ok("客户端位置探测完成")
     else:
         warn("未探测到 ZCode 安装（客户端未装 / 装在非标准位置均可忽略本步）。")
-        info("  稍后可用： python skills/zcode-tokenspeed/scripts/zcode_patcher.py <安装根>  ← 手动指定")
+        info("  稍后可用： python skills/zcode-tools/scripts/zcode_patcher.py <安装根>  ← 手动指定")
 
 
 def step_build(args) -> None:
@@ -467,7 +467,7 @@ def step_status(args) -> None:
 
     if "版本旧" in out or "旧版" in out:
         warn("检测到已注入的补丁版本较旧（或与当前脚本不同源）。")
-        info("  查看差异： python skills/zcode-tokenspeed/scripts/zcode_patcher.py --all --dry-run")
+        info("  查看差异： python skills/zcode-tools/scripts/zcode_patcher.py --all --dry-run")
     info("要把补丁真正写入客户端：**先完全退出 ZCode**，再执行")
     info(f"  {args.python} {PATCHER} --all")
 
@@ -479,7 +479,7 @@ def step_status(args) -> None:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="bootstrap.py",
-        description="zcode-toolkit 跨平台引导：环境自检 → 依赖检查 → 构建校验 → 测试 → 状态。",
+        description="zcode-tools 跨平台引导：环境自检 → 依赖检查 → 构建校验 → 测试 → 状态。",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="示例：\n"
                "  python bootstrap.py\n"
@@ -534,7 +534,7 @@ def main() -> int:
         die("所有步骤都被过滤掉了，无事可做。")
 
     started = time.time()
-    print(_c("1", "zcode-toolkit · 跨平台引导脚本"))
+    print(_c("1", "zcode-tools · 跨平台引导脚本"))
     print(_c("2", f"将要执行的步骤：{' → '.join(STEP_TITLES.get(s, s) for s in steps)}"))
     if args.dry_run:
         warn("dry-run 模式：不会执行任何写操作")
@@ -566,9 +566,9 @@ def main() -> int:
     print(_c("32;1", f"全部完成（{elapsed:.1f}s）。"))
     print()
     info("下一步：")
-    info("  1. 没装插件： ZCode → 设置 → 插件 → 创建 → 添加插件市场 → c80361619/zcode-toolkit")
-    info("  2. 想用命令行： python skills/zcode-tokenspeed/scripts/zcode_patcher.py --all --check")
-    info("  3. 打了补丁但没生效： python skills/zcode-tokenspeed/scripts/doctor.py")
+    info("  1. 没装插件： ZCode → 设置 → 插件 → 创建 → 添加插件市场 → QiAn0107/ZCode-Tools")
+    info("  2. 想用命令行： python skills/zcode-tools/scripts/zcode_patcher.py --all --check")
+    info("  3. 打了补丁但没生效： python skills/zcode-tools/scripts/doctor.py")
     return 0
 
 

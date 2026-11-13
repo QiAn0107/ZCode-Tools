@@ -30,10 +30,10 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-# 兼容两种仓库布局：扁平（scripts/）与插件（skills/zcode-tokenspeed/scripts/）
+# 兼容两种仓库布局：扁平（scripts/）与插件（skills/zcode-tools/scripts/）
 _HERE = Path(__file__).resolve().parent
 for _cand in (_HERE.parent / "scripts",
-              _HERE.parent / "skills" / "zcode-tokenspeed" / "scripts"):
+              _HERE.parent / "skills" / "zcode-tools" / "scripts"):
     if (_cand / "zcode_patcher.py").is_file():
         sys.path.insert(0, str(_cand))
         break
@@ -1152,7 +1152,7 @@ class TestNoConsoleWindowFlags(unittest.TestCase):
         return found
 
     def test_every_subprocess_call_suppresses_the_console_window(self):
-        d = _HERE.parent / "skills" / "zcode-tokenspeed" / "scripts"
+        d = _HERE.parent / "skills" / "zcode-tools" / "scripts"
         if not d.is_dir():
             self.skipTest("非插件形态布局")
         offenders = []
@@ -1262,7 +1262,7 @@ class TestEnhancePromptScript(unittest.TestCase):
         cls.smoke = _HERE / "enhance_mount_smoke.js"
         cls.script = None
         for cand in (_HERE.parent / "scripts",
-                     _HERE.parent / "skills" / "zcode-tokenspeed" / "scripts"):
+                     _HERE.parent / "skills" / "zcode-tools" / "scripts"):
             p = cand / "zcode-enhance-prompt.js"
             if p.is_file():
                 cls.script = p
@@ -1414,7 +1414,7 @@ class TestTpsSidePaneIsolation(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.script = (Path(__file__).resolve().parent.parent
-                      / "skills" / "zcode-tokenspeed" / "scripts" / "zcode-tps.js")
+                      / "skills" / "zcode-tools" / "scripts" / "zcode-tps.js")
         cls.src = cls.script.read_text(encoding="utf-8")
 
     def test_side_pane_detection_guards_exist(self):
@@ -1474,14 +1474,14 @@ class TestDoctor(unittest.TestCase):
     def test_prefix_entries_only_matches_this_plugin(self):
         import doctor
         cfg = {"plugins": {
-            "options": {"zcode-tokenspeed@some-market": {"tps_footer": True},
+            "options": {"zcode-tools@some-market": {"tps_footer": True},
                         "other-plugin@m": {"x": 1}},
-            "enabledPlugins": {"zcode-tokenspeed@some-market": True},
+            "enabledPlugins": {"zcode-tools@some-market": True},
         }}
         self.assertEqual(list(doctor._prefix_entries(cfg, "options")),
-                         ["zcode-tokenspeed@some-market"])
+                         ["zcode-tools@some-market"])
         self.assertEqual(list(doctor._prefix_entries(cfg, "enabledPlugins")),
-                         ["zcode-tokenspeed@some-market"])
+                         ["zcode-tools@some-market"])
         # 缺失 / 类型异常都不能抛异常（config.json 是用户可手改的文件）
         self.assertEqual(doctor._prefix_entries({}, "options"), {})
         self.assertEqual(doctor._prefix_entries({"plugins": {"options": []}}, "options"), {})
@@ -1495,7 +1495,7 @@ class TestDoctor(unittest.TestCase):
             cfg_path.write_text(json.dumps({
                 "plugins": {
                     "enabled": False,
-                    "enabledPlugins": {"zcode-tokenspeed@market": False}
+                    "enabledPlugins": {"zcode-tools@market": False}
                 }
             }), encoding="utf-8")
             orig_find = doctor._find_configs
@@ -1511,7 +1511,7 @@ class TestDoctor(unittest.TestCase):
                 self.assertEqual(rc, 0)
                 fixed = json.loads(cfg_path.read_text(encoding="utf-8"))
                 self.assertTrue(fixed["plugins"]["enabled"])
-                self.assertTrue(fixed["plugins"]["enabledPlugins"]["zcode-tokenspeed@market"])
+                self.assertTrue(fixed["plugins"]["enabledPlugins"]["zcode-tools@market"])
             finally:
                 doctor._find_configs = orig_find
                 doctor._load_patcher = orig_zp
@@ -1581,7 +1581,7 @@ class TestSyncHeartbeat(unittest.TestCase):
     def test_main_beats_when_nothing_to_do(self):
         """配置存在但所有开关都已一致时，也要留下心跳并写明「无需改动」。"""
         self.sync.CONFIG.write_text(json.dumps(
-            {"plugins": {"options": {"zcode-tokenspeed@m": {}}}}), encoding="utf-8")
+            {"plugins": {"options": {"zcode-tools@m": {}}}}), encoding="utf-8")
         with patcher_stubbed(self.sync):
             quiet(self.sync.main)
         text = self.sync.STAMP.read_text(encoding="utf-8")
@@ -1893,8 +1893,8 @@ class TestRunPatcherVerdict(unittest.TestCase):
 class TestSearchMatchesOnlyOurPlugin(unittest.TestCase):
     """★ 回归：配置树查找必须只认**本插件**的键（0.6.3 修复）。
 
-    原实现 `str(key).startswith("zcode-tokenspeed")` 会把 **别的插件**也命中：
-    `zcode-tokenspeed-extra`、`zcode-tokenspeed-pro`、`zcode-tokenspeed-lite` 之类
+    原实现 `str(key).startswith("zcode-tools")` 会把 **别的插件**也命中：
+    `zcode-tools-extra`、`zcode-tools-pro`、`zcode-tools-lite` 之类
     同前缀插件一旦同时安装，`_search()` 撞上谁取决于 dict 的插入顺序 → 表现为
     「开关莫名串台」：把别人的配置当自己的开关去注入/还原，而且**不报任何错**。
 
@@ -1907,17 +1907,22 @@ class TestSearchMatchesOnlyOurPlugin(unittest.TestCase):
         self.sync = sync
 
     def test_accepts_real_host_key_forms(self):
-        for key in ("zcode-tokenspeed@dev-abc123",      # dev 市场
-                    "zcode-tokenspeed@zcode-toolkit",   # 本机仓库即市场
-                    "zcode-tokenspeed"):                # 无市场后缀
+        for key in ("zcode-tools@dev-abc123",      # dev 市场
+                    "zcode-tools@zcode-tools",   # 本机仓库即市场
+                    "zcode-tools"):                # 无市场后缀
             with self.subTest(key=key):
                 self.assertTrue(self.sync._is_our_key(key), f"{key} 应被接受")
 
     def test_rejects_same_prefix_other_plugins(self):
         """核心回归：同前缀的**别的插件**不能被认领。"""
-        for key in ("zcode-tokenspeed-extra@mkt", "zcode-tokenspeed-pro",
-                    "zcode-tokenspeed-lite@mkt", "zcode-tokenspeedfoo",
-                    "my-zcode-tokenspeed@mkt"):
+        for key in ("zcode-tools-extra@mkt", "zcode-tools-pro",
+                    "zcode-tools-lite@mkt", "zcode-toolsfoo",
+                    "my-zcode-tools@mkt",
+                    # 历史别名（fork 前的旧插件名）：干净切割，不认领旧键。
+                    # 注：zcode-tools@<任意市场> 按设计会被接受（dev 安装兼容），
+                    # 这里只锁死"旧插件名开头"的键必须拒绝。
+                    "zcode-tokenspeed@mkt", "zcode-tokenspeed@zcode-toolkit",
+                    "zcode-tokenspeed@zcode-tools"):
             with self.subTest(key=key):
                 self.assertFalse(self.sync._is_our_key(key),
                                  f"{key} 是别的插件/别的位置，不该被认领")
@@ -1928,18 +1933,18 @@ class TestSearchMatchesOnlyOurPlugin(unittest.TestCase):
         注意把 -extra 放在前面 —— 修复前的实现会先撞上它。
         """
         cfg = {"plugins": {
-            "zcode-tokenspeed-extra@mkt": {"usage_chart": False, "enhance_prompt": False},
-            "zcode-tokenspeed@mkt": {"usage_chart": True, "enhance_prompt": True},
+            "zcode-tools-extra@mkt": {"usage_chart": False, "enhance_prompt": False},
+            "zcode-tools@mkt": {"usage_chart": True, "enhance_prompt": True},
         }}
         got = self.sync._search(cfg, "config.json")
         self.assertIsNotNone(got, "应能找到本插件配置")
         val, path = got
-        self.assertEqual(path, "config.json.plugins.zcode-tokenspeed@mkt")
+        self.assertEqual(path, "config.json.plugins.zcode-tools@mkt")
         self.assertTrue(val["enhance_prompt"], "命中串到了 -extra 那份（开关会串台）")
 
     def test_search_returns_none_when_only_other_plugins_present(self):
         """只有同前缀的**别的插件**时，不能认领 —— 否则会拿别人的配置去注入。"""
-        cfg = {"plugins": {"zcode-tokenspeed-extra@mkt": {"usage_chart": True}}}
+        cfg = {"plugins": {"zcode-tools-extra@mkt": {"usage_chart": True}}}
         self.assertIsNone(self.sync._search(cfg, "config.json"))
 
 
@@ -2072,11 +2077,11 @@ class TestAutoInject(unittest.TestCase):
         (root / ".zcode-plugin").mkdir(parents=True)
         (root / ".zcode-plugin" / "plugin.json").write_text(json.dumps({
             # name 必须是本插件（0.6.3 起会校验，防止拿到上级目录里别人的清单）
-            "name": "zcode-tokenspeed",
+            "name": "zcode-tools",
             "userConfig": {"a": {"default": True}, "b": {"default": "high"},
                            "c": {"default": False}, "d": {"no_default": 1}},
         }), encoding="utf-8")
-        scripts = root / "skills" / "zcode-tokenspeed" / "scripts"
+        scripts = root / "skills" / "zcode-tools" / "scripts"
         scripts.mkdir(parents=True)
         orig = self.sync.HERE
         self.sync.HERE = scripts
@@ -2086,7 +2091,7 @@ class TestAutoInject(unittest.TestCase):
             self.sync.HERE = orig
 
     def test_declared_defaults_without_manifest_is_empty(self):
-        scripts = self._d / "lonely" / "skills" / "zcode-tokenspeed" / "scripts"
+        scripts = self._d / "lonely" / "skills" / "zcode-tools" / "scripts"
         scripts.mkdir(parents=True)
         orig = self.sync.HERE
         self.sync.HERE = scripts
@@ -2297,12 +2302,12 @@ class TestDoctorDiscovery(unittest.TestCase):
     def _make_plugin(self, root: Path, version: str = "9.9.9") -> None:
         (root / ".zcode-plugin").mkdir(parents=True, exist_ok=True)
         (root / ".zcode-plugin" / "plugin.json").write_text(
-            json.dumps({"name": "zcode-tokenspeed", "version": version}), encoding="utf-8")
+            json.dumps({"name": "zcode-tools", "version": version}), encoding="utf-8")
 
     def test_finds_plugin_whose_root_is_the_marketplace_root(self):
         with tempfile.TemporaryDirectory() as d:
             storage = Path(d)
-            root = storage / "cli" / "plugins" / "marketplaces" / "zcode-toolkit-abc123"
+            root = storage / "cli" / "plugins" / "marketplaces" / "zcode-tools-abc123"
             self._make_plugin(root)
             self.assertEqual(self._with_storage(storage), [root])
 
@@ -2335,22 +2340,22 @@ class TestDoctorDiscovery(unittest.TestCase):
         `cache/<市场名>/<插件名>/<版本>/` —— 插件根在**版本目录**里。
 
         实测本机 `cache/zcode-plugins-official/computer-use/0.5.13/.zcode-plugin/plugin.json`。
-        用户从 `cache/zcode-toolkit` 敲 `python skills/.../doctor.py` 报 No such file，
+        用户从 `cache/zcode-tools` 敲 `python skills/.../doctor.py` 报 No such file，
         就是因为那一层是**市场目录**，根本没有 skills/。
         """
         with tempfile.TemporaryDirectory() as d:
             storage = Path(d)
             root = (storage / "cli" / "plugins" / "cache"
-                    / "zcode-toolkit" / "zcode-tokenspeed" / "0.5.2")
+                    / "zcode-tools" / "zcode-tools" / "0.5.2")
             self._make_plugin(root, "0.5.2")
             self.assertEqual(self._with_storage(storage), [root])
 
     def test_cache_dir_itself_is_not_a_plugin_root(self):
-        """市场目录那一层（`cache/zcode-toolkit`）不该被认成插件根。"""
+        """市场目录那一层（`cache/zcode-tools`）不该被认成插件根。"""
         with tempfile.TemporaryDirectory() as d:
             storage = Path(d)
-            market = storage / "cli" / "plugins" / "cache" / "zcode-toolkit"
-            (market / "zcode-tokenspeed" / "0.5.2").mkdir(parents=True)
+            market = storage / "cli" / "plugins" / "cache" / "zcode-tools"
+            (market / "zcode-tools" / "0.5.2").mkdir(parents=True)
             self.assertEqual(self._with_storage(storage), [])
 
     def test_multiple_cached_versions_all_found(self):
@@ -2358,7 +2363,7 @@ class TestDoctorDiscovery(unittest.TestCase):
         import doctor
         with tempfile.TemporaryDirectory() as d:
             storage = Path(d)
-            base = storage / "cli" / "plugins" / "cache" / "m" / "zcode-tokenspeed"
+            base = storage / "cli" / "plugins" / "cache" / "m" / "zcode-tools"
             for v in ("0.5.1", "0.5.2"):
                 self._make_plugin(base / v, v)
             found = self._with_storage(storage)
@@ -2390,7 +2395,7 @@ class TestDoctorDiscovery(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             storage = Path(d)
             root = (storage / "cli" / "plugins" / "cache"
-                    / "zcode-toolkit" / "zcode-tokenspeed" / "0.5.2")
+                    / "zcode-tools" / "zcode-tools" / "0.5.2")
             self._make_plugin(root, "0.5.2")
             # 一堆噪声：别的插件不该出现在默认输出里
             for n in ("android-emulator", "browser-use", "computer-use"):
@@ -2402,7 +2407,7 @@ class TestDoctorDiscovery(unittest.TestCase):
             self.assertIn(str(root), out)
             self.assertIn("0.5.2", out)
             self.assertIn("doctor.py", out)          # 给出了可直接复制的命令
-            self.assertIn(str(Path("skills") / "zcode-tokenspeed" / "scripts"), out)
+            self.assertIn(str(Path("skills") / "zcode-tools" / "scripts"), out)
             self.assertNotIn("browser-use", out)     # 默认不列别人的插件
             self.assertIn("--where-all", out)        # 想看全量时告诉用户怎么开
 
@@ -2728,7 +2733,7 @@ class TestDoctorFlagsStaleInjection(unittest.TestCase):
         「全绿但不生效」的老坑。所以在这里把措辞本身钉死。
         """
         src = (Path(__file__).resolve().parent.parent
-               / "skills" / "zcode-tokenspeed" / "scripts" / "zcode_patcher.py")
+               / "skills" / "zcode-tools" / "scripts" / "zcode_patcher.py")
         text = src.read_text(encoding="utf-8")
         self.assertIn("含旧版组件，重跑可自动更新", text,
                       "zcode_patcher.py 改变了旧版组件的措辞；"
@@ -2816,7 +2821,7 @@ class TestDoctorWatchdogSection(unittest.TestCase):
     def test_section_runs_in_full_doctor(self):
         """第 7.5 节要被 main() 真正调用 —— 只写函数不接入等于没有。"""
         src = (Path(__file__).resolve().parent.parent
-               / "skills" / "zcode-tokenspeed" / "scripts" / "doctor.py")
+               / "skills" / "zcode-tools" / "scripts" / "doctor.py")
         text = src.read_text(encoding="utf-8")
         # 只看 main() 里的调用点（函数定义处也含同名子串，不能拿 index() 全局找）
         body = text[text.index("def main()"):]
@@ -2836,7 +2841,7 @@ class TestDoctorWatchdogSection(unittest.TestCase):
         自检会静默地把所有看护都统计成「启动」而永远不报警。
         """
         src = (Path(__file__).resolve().parent.parent
-               / "skills" / "zcode-tokenspeed" / "scripts" / "apply_after_exit.py")
+               / "skills" / "zcode-tools" / "scripts" / "apply_after_exit.py")
         text = src.read_text(encoding="utf-8")
         for phrase in ("看护启动，等待 ZCode 退出", "ZCode 已退出（等待", "DONE",
                        "已再次运行", "等待超时"):
@@ -2864,7 +2869,7 @@ class TestSubprocessTimeouts(unittest.TestCase):
     """
 
     SCRIPTS = (Path(__file__).resolve().parent.parent
-               / "skills" / "zcode-tokenspeed" / "scripts")
+               / "skills" / "zcode-tools" / "scripts")
 
     def _runs_without_timeout(self, path: Path) -> list[int]:
         """返回该文件里所有「缺 timeout=」的 subprocess.run 的行号。"""

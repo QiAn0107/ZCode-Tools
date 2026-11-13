@@ -51,8 +51,8 @@ jobs:
         shell: bash
         run: |
           set -e
-          # 目录名兼容两种仓库布局：扁平 scripts/ 与插件 skills/zcode-tokenspeed/scripts/
-          for d in scripts skills/zcode-tokenspeed/scripts; do
+          # 目录名兼容两种仓库布局：扁平 scripts/ 与插件 skills/zcode-tools/scripts/
+          for d in scripts skills/zcode-tools/scripts; do
             [ -d "$d" ] || continue
             python -m py_compile "$d"/*.py
           done
@@ -62,7 +62,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          for d in scripts skills/zcode-tokenspeed/scripts; do
+          for d in scripts skills/zcode-tools/scripts; do
             [ -d "$d" ] || continue
             for f in "$d"/*.js; do node --check "$f"; done
           done

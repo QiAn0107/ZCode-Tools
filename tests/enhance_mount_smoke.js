@@ -16,7 +16,7 @@ const vm = require("vm");
 const target = process.argv[2];
 if (!target) {
   console.error("用法：node tests/enhance_mount_smoke.js <zcode-enhance-prompt.js 的路径>");
-  console.error("例如：node tests/enhance_mount_smoke.js skills/zcode-tokenspeed/scripts/zcode-enhance-prompt.js");
+  console.error("例如：node tests/enhance_mount_smoke.js skills/zcode-tools/scripts/zcode-enhance-prompt.js");
   process.exit(2);
 }
 let src;

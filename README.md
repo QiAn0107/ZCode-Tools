@@ -1,7 +1,7 @@
-# zcode-tokenspeed · ZCode 客户端一站式原生增强套件
+# ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/c80361619/zcode-toolkit/releases"><img src="https://img.shields.io/badge/version-0.6.24-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.24-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -19,8 +19,8 @@
 > **纯 Python 标准库驱动**：零第三方依赖、免编译；改动仅作用于**本地客户端文件**；  
 > 全量操作严格幂等，支持状态核查与逐项/全量精确还原。
 >
-> ⚠️ **声明**：非官方开源套件，与 ZCode 官方团队无关联。第三方声明见 [NOTICE.md](NOTICE.md)。  
-> （仓库名 `zcode-toolkit` ≠ 插件名 **`zcode-tokenspeed`**，二者保持独立设计以保障配置兼容性）。
+> ⚠️ **声明**：非官方开源套件，与 ZCode 官方团队无关联。第三方声明见 [NOTICE.md](NOTICE.md)。
+> 本仓库 fork 自 [c80361619/zcode-toolkit](https://github.com/c80361619/zcode-toolkit)，市场名与插件名统一为 `zcode-tools`。
 
 ---
 
@@ -31,8 +31,8 @@
 | 步骤 | 操作说明 |
 |:---:|---|
 | **1. 环境确认** | 确认电脑已安装 **Python 3.10+**（系统自带或环境变量已配置）及 **ZCode 客户端**（实测支持 3.11.2 ~ 3.15.1） |
-| **2. 添加市场** | 打开 ZCode **设置 → 插件 → 右上角「创建」→「添加插件市场」**，来源填：<br>`c80361619/zcode-toolkit` |
-| **3. 安装插件** | 在「个人」分段找到 **ZCode 原生体验增强**（`ZCode Patcher`），点 **安装**（装好默认启用） |
+| **2. 添加市场** | 打开 ZCode **设置 → 插件 → 右上角「创建」→「添加插件市场」**，来源填：<br>`QiAn0107/ZCode-Tools` |
+| **3. 安装插件** | 在「个人」分段找到 **ZCode-Tools**，点 **安装**（装好默认启用） |
 | **4. 自动激活** | **完全退出并重启 ZCode**（托盘右键退出），在新会话中发任意一条消息，后台看护进程将自动完成注入并在下次启动后展现全部增强功能！ |
 
 > 💡 **全自动开箱即用**：插件清单内所有功能默认全开，无需打开配置页。如需关闭某项，在插件配置页拨成关并保存即可。
@@ -106,7 +106,7 @@ python3 -c "import pathlib,subprocess,sys; p=next(pathlib.Path.home().glob('.zco
 ### 方式 B：本地源码离线安装
 适合内网、GitHub 网络受限或本地二次开发的场景：
 ```bash
-git clone https://github.com/c80361619/zcode-toolkit.git
+git clone https://github.com/QiAn0107/ZCode-Tools.git
 ```
 在 ZCode「设置 → 插件 → 创建 → 添加插件市场」中选择该仓库目录，校验通过后即可安装。
 
@@ -114,13 +114,13 @@ git clone https://github.com/c80361619/zcode-toolkit.git
 克隆仓库后，直接通过主脚本打补丁：
 ```bash
 # 只读体检（自动探测 ZCode 安装位置）
-python skills/zcode-tokenspeed/scripts/zcode_patcher.py --all --check
+python skills/zcode-tools/scripts/zcode_patcher.py --all --check
 
 # 先完全退出 ZCode，然后一次性注入全部补丁
-python skills/zcode-tokenspeed/scripts/zcode_patcher.py --all
+python skills/zcode-tools/scripts/zcode_patcher.py --all
 
 # 单独还原某项（例如还原 TPS 状态栏）
-python skills/zcode-tokenspeed/scripts/zcode_patcher.py --tps-footer --revert
+python skills/zcode-tools/scripts/zcode_patcher.py --tps-footer --revert
 ```
 
 ### 方式 D：一键引导脚本（开发者专用）

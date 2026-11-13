@@ -4,8 +4,8 @@
 
 ## 1. 模型拉取前端脚本（MIT License）
 
-- 文件：`skills/zcode-tokenspeed/scripts/zcode-model-puller.js`
-- 同一项目的配置同步逻辑被移植到 `skills/zcode-tokenspeed/scripts/model_pull.py`（命令行版）
+- 文件：`skills/zcode-tools/scripts/zcode-model-puller.js`
+- 同一项目的配置同步逻辑被移植到 `skills/zcode-tools/scripts/model_pull.py`（命令行版）
 
 ```
 MIT License

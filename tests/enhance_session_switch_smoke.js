@@ -5,7 +5,7 @@ const fs = require("fs");
 const vm = require("vm");
 const path = require("path");
 
-const target = process.argv[2] || path.join(__dirname, "../skills/zcode-tokenspeed/scripts/zcode-enhance-prompt.js");
+const target = process.argv[2] || path.join(__dirname, "../skills/zcode-tools/scripts/zcode-enhance-prompt.js");
 let src;
 try {
   src = fs.readFileSync(target, "utf8");
