@@ -291,12 +291,19 @@
       const st = document.createElement("style");
       st.id = STYLE_ID;
       st.textContent = [
-        "[data-ztps-bar]{--ztps-fg:#1b1f24;--ztps-dim:#5b6470;--ztps-accent:#b45309}",
+        "[data-ztps-bar]{--ztps-fg:#1b1f24;--ztps-dim:#5b6470;--ztps-accent:#b45309;--ztps-bar-fg:#8a8a8a}",
         ".dark [data-ztps-bar],html.dark [data-ztps-bar],body.dark [data-ztps-bar]",
-        "{--ztps-fg:#e8e8e8;--ztps-dim:#9a9a9a;--ztps-accent:#e0983a}",
+        "{--ztps-fg:#e8e8e8;--ztps-dim:#9a9a9a;--ztps-accent:#e0983a;--ztps-bar-fg:#9a9a9a}",
         "@media (prefers-color-scheme: dark){",
         ":root:not(.light):not([data-theme='light']) [data-ztps-bar]",
-        "{--ztps-fg:#e8e8e8;--ztps-dim:#9a9a9a;--ztps-accent:#e0983a}}",
+        "{--ztps-fg:#e8e8e8;--ztps-dim:#9a9a9a;--ztps-accent:#e0983a;--ztps-bar-fg:#9a9a9a}}",
+        // DeepSeek 风格状态条：单行、无底、统一灰、线性图标、极淡圆点分隔
+        "[data-ztps-bar] .ztps-grp{display:inline-flex;align-items:center;gap:4px;white-space:nowrap}",
+        "[data-ztps-bar] .ztps-grp svg{width:12px;height:12px;flex:0 0 auto;opacity:.8}",
+        "[data-ztps-bar] .ztps-sep{opacity:.32}",
+        "[data-ztps-bar] .ztps-live{width:5px;height:5px;border-radius:50%;background:#4ade80;flex:0 0 auto;",
+        "animation:ztpsBreath 1.2s ease-in-out infinite}",
+        "@keyframes ztpsBreath{0%,100%{opacity:.25}50%{opacity:1}}",
         "[data-ztps-menu]{--ztps-bg:#ffffff;--ztps-fg:#1b1f24}",
         ".dark [data-ztps-menu],html.dark [data-ztps-menu],body.dark [data-ztps-menu]",
         "{--ztps-bg:#1e1e1e;--ztps-fg:#e8e8e8}",
@@ -538,6 +545,37 @@
       : `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 ${hm}`;
   };
 
+  // ---------- 线性图标（DeepSeek 风格：12px、currentColor 描边、无填充） ----------
+  // 测试环境的极简 DOM mock 不支持 createElementNS 时会抛错，此时返回 null，
+  // 渲染退化为纯文字，不影响任何数据链路与断言。
+  const ICONS = {
+    timer: ["M8 3.2a5.1 5.1 0 1 0 0 10.2A5.1 5.1 0 0 0 8 3.2z", "M8 5.8v2.6l1.8 1.1"],
+    bolt: ["M9 1.8 4.4 8.9h2.9l-.9 5.3 4.9-7.3H8.4z"],
+    stack: ["M2.6 5.4 8 2.6l5.4 2.8L8 8.2z", "M2.6 8.6 8 11.4l5.4-2.8", "M2.6 11.6 8 14.4l5.4-2.8"],
+    gauge: ["M8 2.9a5.1 5.1 0 1 0 0 10.2A5.1 5.1 0 0 0 8 2.9z", "M8 8V5.2", "M8 8l3.1 1.9"],
+  };
+  function ico(name) {
+    try {
+      const d = ICONS[name];
+      if (!d) return null;
+      const ns = "http://www.w3.org/2000/svg";
+      const svg = document.createElementNS(ns, "svg");
+      svg.setAttribute("viewBox", "0 0 16 16");
+      svg.setAttribute("fill", "none");
+      svg.setAttribute("stroke", "currentColor");
+      svg.setAttribute("stroke-width", "1.4");
+      svg.setAttribute("stroke-linecap", "round");
+      svg.setAttribute("stroke-linejoin", "round");
+      svg.setAttribute("aria-hidden", "true");
+      for (const p of d) {
+        const el = document.createElementNS(ns, "path");
+        el.setAttribute("d", p);
+        svg.appendChild(el);
+      }
+      return svg;
+    } catch (err) { return null; }
+  }
+
   function statsOf(t) {
     const firstAt = t.firstChunkAt ?? t.rowFirstAt ?? null;
     const ttft = firstAt != null && t.startedAt != null ? firstAt - t.startedAt : null;
@@ -700,7 +738,7 @@
   let diag = null;
   try {
     diag = window.__ztpsDiag = window.__ztpsDiag || {};
-    diag.scriptVersion = "3.20-sink";
+    diag.scriptVersion = "3.21-dsbar";
     diag.loadedAt = new Date().toISOString();
   } catch (err) { /* ignore */ }
 
@@ -799,9 +837,9 @@
         host.style.cssText = "";
         Object.assign(host.style, {
           position: "sticky", top: "8px", zIndex: "30",
-          width: "100%", height: "22px",
+          width: "100%", height: "16px",
           display: "flex", justifyContent: "center",
-          margin: "0 0 -30px", padding: "0",
+          margin: "0 0 -24px", padding: "0",
           pointerEvents: "none",
         });
       }
@@ -817,7 +855,7 @@
           display: "inline-flex", flex: "0 1 auto",
           minWidth: "0", maxWidth: "50%",
           marginLeft: "auto", marginRight: "auto",   // 两侧 auto = 工具栏行内水平居中
-          alignSelf: "center", height: "22px",
+          alignSelf: "center", height: "18px",
           margin: "0", padding: "0", position: "static",
           pointerEvents: "auto",
         });
@@ -953,14 +991,13 @@
         host.setAttribute("data-ztps-mode", mode);
         const pill = document.createElement("div");
         Object.assign(pill.style, {
-          display: "inline-flex", alignItems: "center", gap: "6px",
+          display: "inline-flex", alignItems: "center", gap: "7px",
           minWidth: "0",
-          fontSize: "11px", height: "20px", userSelect: "none",
+          fontSize: "12px", height: "16px", lineHeight: "16px", userSelect: "none",
           fontVariantNumeric: "tabular-nums",
           whiteSpace: "nowrap", overflow: "hidden",
-          borderRadius: "999px",
-          background: "rgba(127,127,127,0.08)",
-          padding: "0 10px",
+          background: "transparent", padding: "0",
+          color: "var(--color-foreground-subtle, var(--ztps-bar-fg, #8a8a8a))",
         });
         pill.addEventListener("contextmenu", (e) => e.preventDefault());
         host.appendChild(pill);
@@ -974,93 +1011,123 @@
       }
       const pill = host.firstChild;
       if (!hasData) {
-        // 空态:仅绿点,今日有消耗则附带总耗;右键切位置等交互照常
+        // 空态：DeepSeek 风格只留「总耗」一组；今日零消耗时整条隐藏，避免留一条看不见的空行
+        host.style.display = "";
         const ekey = "empty|" + today.key + "|" + today.total;
         if (pill._zkey !== ekey) {
           pill._zkey = ekey;
           pill._zsegs = [];
-          pill.style.background = "rgba(127,127,127,0.08)";
-          pill.style.padding = "0 10px";
+          pill.style.background = "transparent";
+          pill.style.padding = "0";
+          pill.style.color = "var(--color-foreground-subtle, var(--ztps-bar-fg, #8a8a8a))";
           pill.innerHTML = "";
-          const dot = document.createElement("span");
-          dot.textContent = "●";
-          dot.style.color = "#4ade80";
-          pill.appendChild(dot);
           if (today.total > 0) {
-            const sep = document.createElement("span");
-            sep.textContent = "│";
-            sep.style.opacity = "0.45";
-            pill.appendChild(sep);
+            const g = document.createElement("span");
+            g.className = "ztps-grp";
+            const ic = ico("gauge");
+            if (ic) g.appendChild(ic);
             const lab = document.createElement("span");
             lab.textContent = "总耗 ";
-            pill.appendChild(lab);
+            g.appendChild(lab);
             const val = document.createElement("span");
             val.textContent = fmtTok(today.total);
-            val.style.color = "var(--color-foreground, var(--ztps-fg, #1b1f24))";
-            pill.appendChild(val);
+            g.appendChild(val);
+            pill.appendChild(g);
+          } else {
+            host.style.display = "none";
           }
         }
         return;
       }
+      host.style.display = "";
       // 只有快照、没有事件流轮次（重开旧会话）时给一份空指标，只渲染累计区
       const s = latest ? statsOf(latest) : { stamp: null, ttft: null, tps: null, out: 0, reasoning: 0, streaming: false };
       // 内容签名:未变化时完全跳过 DOM 写入与排版回流，达到零开销
       const key = [s.stamp, s.ttft, s.tps, s.out, s.reasoning, s.streaming,
                    agg.rounds, agg.input, agg.cache, agg.cacheWrite, agg.reasoning, agg.output,
                    today.key, today.total, _snapCache.stamp].join("|");
+      // 窗口宽度变化 >8px 时让签名失效：重建段列表并按新宽度重新计算降级，
+      // 否则缩窄时丢掉的段在放大后永远回不来。
+      // 量的是**宿主可用宽度**（stretch，等于容器宽），不能量胶囊自身宽度：
+      // 降级后内容变少胶囊会变窄，用它会误判成「窗口变了」而反复重建自激。
+      const availW = host.clientWidth;
+      if (pill._zw != null && Math.abs(availW - pill._zw) > 8) pill._zkey = "";
+      pill._zw = availW;
       let segs = pill._zsegs;
       if (pill._zkey !== key) {
         pill._zkey = key;
-        pill.style.background = "rgba(127,127,127,0.08)";
-        pill.style.padding = "0 10px";
-        pill.style.color = "var(--color-foreground-subtle, var(--ztps-dim, #5b6470))";
+        pill.style.background = "transparent";
+        pill.style.padding = "0";
+        pill.style.color = "var(--color-foreground-subtle, var(--ztps-bar-fg, #8a8a8a))";
         pill.innerHTML = "";
-        const ACCENT = "var(--color-warning, var(--ztps-accent, #b45309))";
-        const VALUE = "var(--color-foreground, var(--ztps-fg, #1b1f24))";
-        const span = (txt, cls) => {
+        const span = (txt) => {
           const sp = document.createElement("span");
           sp.textContent = txt;
-          if (cls === "ACCENT") sp.style.color = ACCENT;
-          else if (cls === "VALUE") sp.style.color = VALUE;
           return sp;
         };
-        // 绿点常驻:生成中发亮,空闲静态
-        const dot = span("●");
-        dot.style.color = "#4ade80";
-        if (s.streaming) dot.style.textShadow = "0 0 6px rgba(74,222,128,.8)";
-        pill.appendChild(dot);
-        // 段布局:即时指标(g0:首 token/tok/s)+ 会话累计(g1:输入/输出/平均命中)+ 今日总耗(g2:总耗)。
-        // 组间用竖线分隔,组内用 · ;不显示时间(用户不需要)
+        // 组：图标(可选) + 标签 + 数值，宽度不够时整组一起消失
+        const grp = (iconName, nodes) => {
+          const g = document.createElement("span");
+          g.className = "ztps-grp";
+          const ic = iconName ? ico(iconName) : null;
+          if (ic) g.appendChild(ic);
+          for (const n of nodes) g.appendChild(n);
+          return g;
+        };
+        // 生成中才显示呼吸点（DeepSeek 无常驻指示点）
+        if (s.streaming) {
+          const live = document.createElement("span");
+          live.className = "ztps-live";
+          pill.appendChild(live);
+        }
         segs = [];
-        if (s.ttft != null && s.ttft >= 0) segs.push({ p: 1, g: 0, nodes: [span("首 token "), span(fmtLat(s.ttft), "VALUE")] });
-        if (s.tps != null) segs.push({ p: 2, g: 0, nodes: [span(fmtTps(s.tps) + " tok/s", "ACCENT")] });
-        if (agg.input > 0) segs.push({ p: 5, g: 1, nodes: [span("输入 "), span(fmtTok(agg.input), "VALUE")] });
-        if (agg.output > 0) segs.push({ p: 6, g: 1, nodes: [span("输出 "), span(fmtTok(agg.output), "VALUE")] });
+        if (s.ttft != null && s.ttft >= 0) {
+          segs.push({ p: 1, nodes: [grp("timer", [span("首 token "), span(fmtLat(s.ttft))])] });
+        }
+        if (s.tps != null) {
+          segs.push({ p: 2, nodes: [grp("bolt", [span(fmtTps(s.tps) + " tok/s")])] });
+        }
+        if (agg.input > 0) {
+          segs.push({ p: 5, nodes: [grp("stack", [span("输入 "), span(fmtTok(agg.input))])] });
+        }
+        if (agg.output > 0) {
+          segs.push({ p: 6, nodes: [grp("stack", [span("输出 "), span(fmtTok(agg.output))])] });
+        }
         if (agg.input > 0) {
           const pct = (agg.cache / agg.input) * 100;
-          segs.push({ p: 5.6, g: 1, nodes: [span(" 平均命中 " + fmtPct(pct) + "%", "ACCENT")] });
+          segs.push({ p: 5.6, nodes: [grp(null, [span("缓存命中 " + fmtPct(pct) + "%")])] });
         }
-        if (today.total > 0) segs.push({ p: 7, g: 2, nodes: [span("总耗 "), span(fmtTok(today.total), "VALUE")] });
+        if (today.total > 0) {
+          segs.push({ p: 7, nodes: [grp("gauge", [span("总耗 "), span(fmtTok(today.total))])] });
+        }
+        // 组间统一用极淡的 ·（DeepSeek 无竖线）；分隔符跟段一起，降级时同生共死
         segs.forEach((g, i) => {
           if (i > 0) {
-            const cross = segs[i - 1].g !== g.g;   // 跨组:竖线分隔,更醒目
-            const sep = span(cross ? "│" : "·");
-            sep.style.opacity = cross ? "0.45" : "0.55";
-            g.nodes.unshift(sep);   // 分隔符跟段一起,降级时同生共死
+            const sep = span("·");
+            sep.className = "ztps-sep";
+            g.nodes.unshift(sep);
           }
         });
         segs.forEach((g) => g.nodes.forEach((n) => pill.appendChild(n)));
         pill._zsegs = segs;
 
-        // 仅在文本内容有变动时，才在 rAF 中执行溢出降级检查，杜绝无意义的 scrollWidth 强制回流
+        // 仅在文本内容有变动时，才在 rAF 中执行溢出降级检查，杜绝无意义的 scrollWidth 强制回流。
+        // 优先级：先丢首 token → 再丢 tok/s，会话累计（输入/输出/缓存命中/总耗）保留。
         try {
           requestAnimationFrame(() => {
             try {
-              for (const drop of [7, 1, 2]) {
+              for (const drop of [1, 2, 7]) {
                 if (pill.scrollWidth <= pill.clientWidth + 1) break;
                 const g = segs.find((x) => x.p === drop);
                 if (!g) continue;
                 g.nodes.forEach((n) => n.remove());
+              }
+              // 首段被丢弃后，第二段的分隔符会变成行首的孤立 ·，一并摘掉
+              let lead = pill.firstElementChild;
+              while (lead && lead.classList && lead.classList.contains("ztps-sep")) {
+                const next = lead.nextElementSibling;
+                lead.remove();
+                lead = next;
               }
             } catch (err) { /* 静默 */ }
           });

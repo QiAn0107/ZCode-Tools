@@ -1607,7 +1607,7 @@ class TestTpsSidePaneIsolation(unittest.TestCase):
 
         已删除：第 N 轮、总用、命中绝对值、累思、思考显示；累出改名为输出。
         """
-        for label in ('span("输入 ")', 'span("输出 ")', "平均命中", 'span("总耗 ")',
+        for label in ('span("输入 ")', 'span("输出 ")', "缓存命中", 'span("总耗 ")',
                       "fmtPct", "DAILY_KEY", "addDaily", "readToday"):
             self.assertIn(label, self.src, f"状态栏必须包含 {label}")
         for gone in ('span("总用 ")', 'span("out ")', 'span("累出 ")', "累思",
