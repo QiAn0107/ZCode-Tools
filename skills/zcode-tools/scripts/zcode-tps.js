@@ -700,7 +700,7 @@
   let diag = null;
   try {
     diag = window.__ztpsDiag = window.__ztpsDiag || {};
-    diag.scriptVersion = "3.19-sid";
+    diag.scriptVersion = "3.20-sink";
     diag.loadedAt = new Date().toISOString();
   } catch (err) { /* ignore */ }
 
@@ -714,6 +714,7 @@
   // 直接量「胶囊上沿到卡片下沿」「胶囊下沿到下一元素」的实际像素，用等量负 margin 抵消，
   // 使视觉间距恒为 GAP_TARGET。布局变更/窗口缩放后再量一次即自适应。
   const GAP_TARGET = 2;   // 目标视觉间距(px)
+  const MAX_SINK = 16;    // 末位元素最多下沉多少(px)，防止跑到父容器外压到别的东西
   const px = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; };
   function fitGap(host, card) {
     if (!host || !card || !host.isConnected || !card.isConnected) return;
@@ -731,22 +732,30 @@
         host.style.marginTop = (px(host.style.marginTop) - topErr) + "px";
         h = host.getBoundingClientRect();               // 立即回流，取补偿后的真实位置
       }
-      // 下方空白：有兄弟节点量到兄弟上沿，否则量到父容器内容区底(扣掉 padding)
       const nx = host.nextElementSibling;
-      let limit;
       if (nx) {
-        limit = nx.getBoundingClientRect().top;
+        // 后面还有元素：负 margin 能真正把后续内容拉上来，量到它上沿即可
+        const botErr = nx.getBoundingClientRect().top - h.bottom;
+        if (botErr > 0.5) {
+          host.style.marginBottom = (px(host.style.marginBottom) - Math.min(botErr, cap)) + "px";
+        } else if (botErr < -0.5) {
+          host.style.marginBottom = (px(host.style.marginBottom) + Math.min(-botErr, cap)) + "px";
+        }
+        host.style.transform = "";
+        if (diag) { diag.gapSink = 0; diag.gapNext = true; }
       } else {
+        // 末位元素：负 margin 只会压缩父容器总高，**不会让胶囊自己下移**（父高 auto 时
+        // 容器底同步上移，偏差恒定不变），所以「胶囊↔底部边框」这段只能靠视觉位移沉下去。
+        // 沉入量 = 父容器边框盒底 - 胶囊下沿 - 2(留白)，上限 MAX_SINK；只沉进 padding，
+        // 不越过父容器，绝不压到其它 UI。
+        host.style.marginBottom = "0px";
         const p = host.parentElement;
         const pcs = getComputedStyle(p);
-        limit = p.getBoundingClientRect().bottom - (parseFloat(pcs.paddingBottom) || 0);
-      }
-      const botErr = limit - h.bottom;                  // 正=下方还有空白 负=已重叠
-      if (botErr > 0.5) {
-        host.style.marginBottom = (px(host.style.marginBottom) - Math.min(botErr, cap)) + "px";
-      } else if (botErr < -0.5) {
-        // 补偿过头（布局变更）：最多退回 cap，不动应用自身布局
-        host.style.marginBottom = (px(host.style.marginBottom) + Math.min(-botErr, cap)) + "px";
+        const bBottom = p.getBoundingClientRect().bottom - px(pcs.borderBottomWidth);
+        const room = bBottom - h.bottom - GAP_TARGET;
+        const sink = Math.max(0, Math.min(room, MAX_SINK));
+        host.style.transform = sink > 0.5 ? "translateY(" + sink + "px)" : "";
+        if (diag) { diag.gapSink = sink; diag.gapNext = false; }
       }
     } catch (err) { /* 静默 */ }
   }

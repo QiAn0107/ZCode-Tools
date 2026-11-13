@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.28-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.29-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -151,6 +151,12 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.29（状态栏与底部边框的距离）
+- **末位元素负 margin 收不掉下方留白**：胶囊是父容器最后一个子元素时，`marginBottom` 负值只会压缩容器总高（父高 auto 时容器底同步上移，偏差恒定），**胶囊自己不会下移**，那段 `padding-bottom` 怎么调都还在。改为按「父容器边框盒底 − 胶囊下沿 − 2px」算下沉量，用 `translateY` 做视觉位移沉进 padding，上限 `MAX_SINK=16px`，不越过父容器、不压其它 UI；
+- 有后继兄弟时仍用负 margin（那条路径有效），两条路径分开处理，互不干扰；
+- 诊断：`__ztpsDiag.gapSink`（实际下沉像素）/`gapNext`（是否末位）；
+- **测试**：冒烟新增 `MAX_SINK`、`translateY` 下沉、`room` 反算断言，全量 312 项通过。
 
 #### 0.6.28（会话 id 兜底：让快照回填真正落到当前会话）
 - **会话 id 取不到 = 输入/命中永远不显示**：3.17.x 把 `data-session-id` 挂在 composer 卡片上（无会话时是 `"draft"`），不在 `[data-workspace-conversation-frame]` 上；原逻辑只查 frame → `domSess=null` → 按会话查快照直接跳过。兜底顺序：① 事件流轮次自带的 `sessionId`（取最近有活动的一轮）② 主会话 DOM 里任一非 `draft` 的 `data-session-id`（排除侧边栏）；

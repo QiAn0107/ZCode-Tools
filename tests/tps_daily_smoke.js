@@ -169,10 +169,17 @@ check(/const cap = Math\.max\(0, rawTop\)/.test(src),
       "缺 cap 上限，会吞掉应用自己的下边距把其它元素往上拽");
 check(/Math\.abs\(topErr\) > 0\.5/.test(src) && /botErr > 0\.5/.test(src),
       "缺收敛阈值，稳定后仍会每秒写样式");
+// 末位元素：负 margin 不会让胶囊自己下移（父高 auto 时容器底同步上移），
+// 「胶囊↔底部边框」只能靠视觉位移沉进父容器 padding。
+check(/const MAX_SINK = \d+/.test(src), "缺 MAX_SINK 上限，下沉可能压到父容器外");
+check(/host\.style\.transform = sink > 0\.5 \? "translateY\(" \+ sink \+ "px\)" : ""/.test(src),
+      "末位元素没有 translateY 下沉，下方到边框的留白收不掉");
+check(/const room = bBottom - h\.bottom - GAP_TARGET/.test(src),
+      "下沉量必须按父容器边框盒底反算，否则会越过父容器");
 check(/now - host\._fitAt > 1000/.test(src),
       "缺重量节流，布局/窗口变化后补偿不会刷新");
 check(!/parentRowGap/.test(src), "旧的 parentRowGap 猜测式补偿应已移除");
-check(/scriptVersion = "3\.19-sid"/.test(src), "脚本版本号未同步到 3.19-sid");
+check(/scriptVersion = "3\.20-sink"/.test(src), "脚本版本号未同步到 3.20-sink");
 
 // ---------- ⑤ 早到 delta pending 回放 ----------
 // 首批带 input 的 delta 常早于 turnHeader/respTurn 桥接到达：必须暂存待回放，

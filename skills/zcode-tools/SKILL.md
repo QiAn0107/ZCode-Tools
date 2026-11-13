@@ -485,7 +485,7 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 
 统计条右键弹出自绘菜单，可在「输入框下方（默认）/ 输入框工具栏 / 会话顶部 sticky」间切换，`localStorage`（键 `ztps-pos`）记忆，重开保持：
 
-- **输入框下方**：composer 卡片之后的独立行（`insertAdjacentElement` 于卡片后），`alignSelf: stretch` 与输入框同宽；**实测像素间距对齐**（0.6.27）：不再猜父容器 `gap`（Tailwind `space-y-*`／margin 布局读不到，0.6.25 的 `rowGap` 方案会静默失效），挂载后量「胶囊上沿↔卡片下沿」「胶囊下沿↔下一元素」，用 `marginTop/marginBottom` **增量**抵到 `GAP_TARGET=2px`（绝对值反算会在 0 与 -gap 间自激振荡），偏差 <0.5px 即停写；快路径 1s 节流重量，布局/窗口/主题变化自动跟随。
+- **输入框下方**：composer 卡片之后的独立行（`insertAdjacentElement` 于卡片后），`alignSelf: stretch` 与输入框同宽；**实测像素间距对齐**（0.6.27）：不再猜父容器 `gap`（Tailwind `space-y-*`／margin 布局读不到，0.6.25 的 `rowGap` 方案会静默失效），挂载后量「胶囊上沿↔卡片下沿」「胶囊下沿↔下一元素」，用 `marginTop/marginBottom` **增量**抵到 `GAP_TARGET=2px`（绝对值反算会在 0 与 -gap 间自激振荡），偏差 <0.5px 即停写；**末位元素另走视觉位移**（0.6.29）：胶囊是父容器最后一个子元素时负 `marginBottom` 只压缩容器总高、不会让胶囊下移，改用 `translateY(min(父边框盒底−胶囊下沿−2, 16))` 沉进 padding；快路径 1s 节流重量，布局/窗口/主题变化自动跟随。
 - **输入框工具栏**：行内水平居中。
 - **会话顶部**：吸附到消息区滚动容器（从 `section[data-turn-id]` 向上找第一个 `overflow-y: auto/scroll` 且高 >120px 的祖先）第一个子元素，`position: sticky; top: 8px` 悬浮；host 上 `pointer-events: none` 放行下方消息。
 - 数据层零改动，仅挂载点不同；挂载点找不到（空态/设置页）时自清理，`window.__ztpsDiag.posMode`/`hiddenReason` 可诊断。右键修复注记：菜单用 pointerdown 捕获关外部点击时必须放行菜单内部按下，否则 click 在已移除节点上落空、选项永远点不中。
