@@ -329,6 +329,7 @@
       startedAt: null, endedAt: null, activeMs: null, modelDurationMs: null,
       firstChunkAt: null, rowFirstAt: null, lastUsageAt: null,
       outputTokens: 0, inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, totalTokens: 0,
+      steps: 0, reqIds: null,   // 步数=已完成模型请求数；reqIds 按 requestId 去重
       textTok: 0, win: [], modelId: null, streaming: false,
     });
     return turns.get(id);
@@ -339,6 +340,7 @@
     t.endedAt = null; t.activeMs = null; t.modelDurationMs = null;
     t.firstChunkAt = null; t.rowFirstAt = null; t.lastUsageAt = null;
     t.outputTokens = 0; t.inputTokens = 0; t.cacheReadTokens = 0; t.cacheWriteTokens = 0; t.reasoningTokens = 0; t.totalTokens = 0;
+    t.steps = 0; t.reqIds = null;
     t.textTok = 0; t.win = []; t.lastTps = null; t.streaming = true;
     // 旧会话 ID/命令 ID 不清会污染新轮：sessionId 导致 renderBar 会话过滤误杀，
     // sourceCommandId 导致 findByScid 把旧轮当新轮命中（usage 串台）
@@ -411,6 +413,14 @@
 
   // 单条 usage.delta 累加到轮（直达与 pending 回放共用；addDaily 不在此，避免今日重复计）
   function applyUsage(t, ev) {
+    // 步数口径：usage.delta 每次模型请求完成发一条（一轮含工具调用会有多条），
+    // 按 requestId 去重，防止重复投递/回放把同一步算两次；老事件无 id 时按条计。
+    if (ev.requestId != null) {
+      if (!t.reqIds) t.reqIds = new Set();
+      if (!t.reqIds.has(ev.requestId)) { t.reqIds.add(ev.requestId); t.steps = (t.steps || 0) + 1; }
+    } else {
+      t.steps = (t.steps || 0) + 1;
+    }
     t.outputTokens += ev.outputTokens || 0;
     t.inputTokens += ev.inputTokens || 0;
     t.cacheReadTokens += ev.cacheReadTokens || 0;
@@ -700,7 +710,7 @@
   let diag = null;
   try {
     diag = window.__ztpsDiag = window.__ztpsDiag || {};
-    diag.scriptVersion = "3.20-sink";
+    diag.scriptVersion = "3.22-turnstep";
     diag.loadedAt = new Date().toISOString();
   } catch (err) { /* ignore */ }
 
@@ -884,14 +894,18 @@
         }
       }
       lastVisible = visible;
-      // 会话累计:轮数 / 累计输入 / 累计缓存命中 / 累计思考 / 累计输出(仅当前可见会话的轮次)
-      const agg = { rounds: 0, input: 0, cache: 0, cacheWrite: 0, reasoning: 0, output: 0 };
+      // 会话累计:轮数/步数 / 累计输入 / 累计缓存命中 / 累计思考 / 累计输出(仅当前可见会话的轮次)
+      const agg = { rounds: 0, steps: 0, input: 0, cache: 0, cacheWrite: 0, reasoning: 0, output: 0 };
       let latest = null;
+      // 流式中的轮一定还没落库：快照合并时把它补回基线，重开旧会话后首轮也能立即 +1
+      let streamTurns = 0, streamSteps = 0;
       for (const t of turns.values()) {
         if (!visible.has(t.msgId)) continue;
         // 轮次归属会话与当前显示会话不符时排除(会话切换的 DOM 中间态残留兜底)
         if (t.sessionId && domSess && t.sessionId !== domSess) continue;
         if (t.startedAt != null || hasActivity(t)) agg.rounds++;
+        agg.steps += t.steps || 0;
+        if (t.streaming) { streamTurns++; streamSteps += t.steps || 0; }
         agg.input += t.inputTokens || 0;
         agg.cache += t.cacheReadTokens || 0;
         agg.cacheWrite += t.cacheWriteTokens || 0;
@@ -909,6 +923,12 @@
         if ((snap.input || 0) > agg.input) agg.input = snap.input;
         if ((snap.cache_read || 0) > agg.cache) agg.cache = snap.cache_read;
         if ((snap.output || 0) > agg.output) agg.output = snap.output;
+        // 轮/步是会话级全历史:快照 turns=distinct turn_id、requests=completed 模型请求数。
+        // 快照只在轮末写入,流式中的轮一定还没进去,故在快照基线上补回它,再与事件流取大。
+        const snapRounds = (snap.turns || 0) + streamTurns;
+        const snapSteps = (snap.requests || 0) + streamSteps;
+        if (snapRounds > agg.rounds) agg.rounds = snapRounds;
+        if (snapSteps > agg.steps) agg.steps = snapSteps;
       }
       // 今日总耗(全局口径:含所有会话/侧边栏,以 Σ(input+output) 精确值计)
       const today = readToday();
@@ -924,7 +944,11 @@
         diag.todayTotal = today.total;
         diag.pendingUsageSize = pendingUsage.size;
         diag.appliedFromPending = appliedFromPending;
+        diag.aggRounds = agg.rounds;
+        diag.aggSteps = agg.steps;
         diag.snapshotHit = !!snap;
+        diag.snapTurns = snap ? (snap.turns || 0) : 0;
+        diag.snapRequests = snap ? (snap.requests || 0) : 0;
         diag.snapshotOk = _snapCache.ok;
         diag.snapshotErr = _snapCache.err;
         diag.snapshotTs = _snapCache.stamp || 0;
@@ -1006,7 +1030,7 @@
       const s = latest ? statsOf(latest) : { stamp: null, ttft: null, tps: null, out: 0, reasoning: 0, streaming: false };
       // 内容签名:未变化时完全跳过 DOM 写入与排版回流，达到零开销
       const key = [s.stamp, s.ttft, s.tps, s.out, s.reasoning, s.streaming,
-                   agg.rounds, agg.input, agg.cache, agg.cacheWrite, agg.reasoning, agg.output,
+                   agg.rounds, agg.steps, agg.input, agg.cache, agg.cacheWrite, agg.reasoning, agg.output,
                    today.key, today.total, _snapCache.stamp].join("|");
       let segs = pill._zsegs;
       if (pill._zkey !== key) {
@@ -1029,11 +1053,15 @@
         dot.style.color = "#4ade80";
         if (s.streaming) dot.style.textShadow = "0 0 6px rgba(74,222,128,.8)";
         pill.appendChild(dot);
-        // 段布局:即时指标(g0:首 token/tok/s)+ 会话累计(g1:输入/输出/平均命中)+ 今日总耗(g2:总耗)。
+        // 段布局:即时指标(g0:首 token/tok/s)+ 会话累计(g1:轮数/步数/输入/输出/平均命中)+ 今日总耗(g2:总耗)。
         // 组间用竖线分隔,组内用 · ;不显示时间(用户不需要)
         segs = [];
         if (s.ttft != null && s.ttft >= 0) segs.push({ p: 1, g: 0, nodes: [span("首 token "), span(fmtLat(s.ttft), "VALUE")] });
         if (s.tps != null) segs.push({ p: 2, g: 0, nodes: [span(fmtTps(s.tps) + " tok/s", "ACCENT")] });
+        if (agg.rounds > 0 && agg.steps > 0) {
+          // 会话累计轮/步:严格按用户口径渲染成 N轮N步
+          segs.push({ p: 3, g: 1, nodes: [span(agg.rounds + "轮", "VALUE"), span(agg.steps + "步", "VALUE")] });
+        }
         if (agg.input > 0) segs.push({ p: 5, g: 1, nodes: [span("输入 "), span(fmtTok(agg.input), "VALUE")] });
         if (agg.output > 0) segs.push({ p: 6, g: 1, nodes: [span("输出 "), span(fmtTok(agg.output), "VALUE")] });
         if (agg.input > 0) {
@@ -1056,7 +1084,7 @@
         try {
           requestAnimationFrame(() => {
             try {
-              for (const drop of [7, 1, 2]) {
+              for (const drop of [7, 1, 2, 3]) {
                 if (pill.scrollWidth <= pill.clientWidth + 1) break;
                 const g = segs.find((x) => x.p === drop);
                 if (!g) continue;

@@ -212,7 +212,7 @@ python "<skill目录>/scripts/zcode_patcher.py" --model-puller
 |---|---|---|---|
 | 打开统计图 | 用量页趋势图/饼图去截断 | `python zcode_patcher.py --usage-chart [--check/--revert]` | app.asar 内渲染文件（同长度原地改字节 + integrity 同步） |
 | 加宽模型弹窗 | 模型选择浮窗加宽，长模型名不再截断 | `python zcode_patcher.py [--check/--revert]` | app.asar 内主 bundle（同长度原地改字节） |
-| 打开状态栏 | 输入框下方居中统计条（**v2 纯 DOM 观测，3.12.2+ 安全**；右键可切工具栏/会话顶部 sticky）：即时指标（首 token/tok/s）+ 会话累计（输入/输出/平均命中率）+ 今日总耗 | `python zcode_patcher.py --tps-footer [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
+| 打开状态栏 | 输入框下方居中统计条（**v2 纯 DOM 观测，3.12.2+ 安全**；右键可切工具栏/会话顶部 sticky）：即时指标（首 token/tok/s）+ 会话累计（N轮N步、输入/输出/平均命中率）+ 今日总耗 | `python zcode_patcher.py --tps-footer [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
 | 模型拉取按钮 | 设置页一键拉取/勾选模型 | `python zcode_patcher.py --model-puller [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
 | **增强提示词** | 输入框旁一键润色草稿（可恢复原文）；**右键**弹出菜单选择使用哪个模型 | `python zcode_patcher.py --enhance-prompt [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
 
@@ -452,14 +452,15 @@ python zcode_patcher.py --revert   # 从 sidecar 还原
 **默认挂在输入框（composer 卡片）下方、水平居中**的独立统计行（右键可切到工具栏行内居中或会话顶部 sticky），左组为即时指标，中组为**当前会话累计**，右组为**今日总耗**（不含时间）：
 
 ```
-生成中:  ● 32 tok/s │ 输入 45.2k · 输出 12.3k · 平均命中 84.00% │ 总耗 58.1k
-结束后:  ● 首 token 37s · 45 tok/s │ 输入 45.2k · 输出 12.3k · 平均命中 84.00% │ 总耗 58.1k
+生成中:  ● 32 tok/s │ 12轮34步 · 输入 45.2k · 输出 12.3k · 平均命中 84.00% │ 总耗 58.1k
+结束后:  ● 首 token 37s · 45 tok/s │ 12轮34步 · 输入 45.2k · 输出 12.3k · 平均命中 84.00% │ 总耗 58.1k
 空会话:  ● 总耗 58.1k（今日无消耗时仅显示 ●）
 ```
 
+- **轮/步口径**：轮=本会话已完成轮数（快照 `count(distinct turn_id)`）；步=已完成模型请求数（快照 `count(*)`，一次模型请求=一步，一轮含工具调用会有多步）。事件流按 `usage.delta.requestId` 去重实时累加；与快照合并取 `max(事件流累计, 快照 + 流式中轮次)`，重开旧会话、轮次滚出视口都不丢历史；流式轮补差保证新轮立即 +1；步数为 0 时该段不显示，避免「1轮0步」。
 - **会话累计口径**：输入/输出=各轮 `usage.delta` 累加（API 计费视角，每轮 inputTokens 含历史所以累计值偏大，属预期）；平均命中=累计缓存命中 ÷ 累计输入（`input>0` 即显示，`0.00%` 也显示），**固定两位小数四舍五入**（`fmtPct`，不足补零，如 `84.00%`）；流式中未报 usage 的轮以内容估算兜底。
 - **今日总耗口径**：今日 Σ(inputTokens + outputTokens)，只计 `usage.delta` 精确值（不含流式估算），按 `occurredAt` 本地日期分桶；全局口径，含所有会话与侧边栏辅助对话。仅补丁运行期间捕获（ZCode 未运行时/历史消耗不计）；数据存 `localStorage`（键 `ztps-daily-v1`），保留近 30 天，重复事件幂等去重，多窗口经 `storage` 事件同步，清 localStorage 即清零。
-- **渐进降级顺序**：溢出时先丢总耗 → 首 token → tok/s，会话累计段保留。
+- **渐进降级顺序**：溢出时先丢总耗 → 首 token → tok/s → 轮步，输入/输出/命中保留。
 
 ```bash
 python zcode_patcher.py --tps-footer             # 注入 scripts/zcode-tps.js
@@ -504,8 +505,8 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 
 **结算层**（0.6.26，精确值 + 全历史，秒级延迟）：
 
-6. Python 侧 `tps_snapshot.py` 只读 `~/.zcode/cli/db/db.sqlite`（`mode=ro`），按 `session_id` 聚合 `model_usage`（`status='completed'`）+ 今日全局，写 `~/.zcode/v2/ztps-snapshot.json`；触发点：SessionStart worker、**每轮结束的 `Stop` 钩子**（0.6.27，DB 只有轮末落库，只靠 SessionStart 会把今日总耗冻在会话开始那一刻）、看护写补丁前。无新增常驻进程。口径移植自 `xhwxt/zcode-token-usage-statusbar` (MIT)：合计=`computed_total`（=input+output，cache 已含 input 不重复加），命中=`cache_read/input`。钩子调用必须带 `--quiet`，否则 stdout 非 JSON 会被判钩子失败。
-7. 渲染层经 `zcode:tps-snapshot` IPC（preload 桥 + main 只读 handler，与 enhance bridge 同锚点模式）取快照，3s TTL 缓存，**轮次结束强制失效**（`_snapCache.at = 0`）即时取本轮结算值；以 `Math.max(事件累计, 快照值)` 回填会话输入/输出/命中与今日总耗——事件优先、快照补漏，流式值不会被拉低。快照缺失/损坏/无桥时静默降级为纯事件流（`__ztpsDiag.snapshotHit/snapshotOk/snapshotErr/snapshotTs/snapshotToday/snapshotAge` 可查）。
+6. Python 侧 `tps_snapshot.py` 只读 `~/.zcode/cli/db/db.sqlite`（`mode=ro`），按 `session_id` 聚合 `model_usage`（`status='completed'`）+ 今日全局，写 `~/.zcode/v2/ztps-snapshot.json`；每会话同时带 `turns`（`count(distinct turn_id)`）与 `requests`（completed 行数=模型请求数），供状态栏 `N轮N步` 使用。触发点：SessionStart worker、**每轮结束的 `Stop` 钩子**（0.6.27，DB 只有轮末落库，只靠 SessionStart 会把今日总耗冻在会话开始那一刻）、看护写补丁前。无新增常驻进程。口径移植自 `xhwxt/zcode-token-usage-statusbar` (MIT)：合计=`computed_total`（=input+output，cache 已含 input 不重复加），命中=`cache_read/input`。钩子调用必须带 `--quiet`，否则 stdout 非 JSON 会被判钩子失败。
+7. 渲染层经 `zcode:tps-snapshot` IPC（preload 桥 + main 只读 handler，与 enhance bridge 同锚点模式）取快照，3s TTL 缓存，**轮次结束强制失效**（`_snapCache.at = 0`）即时取本轮结算值；以 `Math.max(事件累计, 快照值)` 回填会话输入/输出/命中、轮数/步数（快照 `turns/requests` + 流式中轮次补差）与今日总耗——事件优先、快照补漏，流式值不会被拉低。快照缺失/损坏/无桥时静默降级为纯事件流（`__ztpsDiag.snapshotHit/snapshotOk/snapshotErr/snapshotTs/snapshotToday/snapshotAge/aggRounds/aggSteps/snapTurns/snapRequests` 可查）。
 8. **handler 参数陷阱**（0.6.27 修复）：`ipcMain.handle(ch, (event, ...args))` 的第二参数是**渲染层实参**，不是模块。0.6.26 写成 `async(ev,t)=>{...t.join(...)}` 而 preload 不传参 → `t===undefined` → 每次 invoke 抛 TypeError → 永远 `read-failed`，快照整条链路静默失效（表现为输入/命中不显示、今日总耗只吃 localStorage 存量）。路径模块必须用 `import` 进来的 `r`。
 
 ### 注入原理（asar 重打包级）

@@ -1,10 +1,11 @@
 // TPS 状态栏「今日总耗」冒烟测试。
 //
-// 锁三件事：
+// 锁四件事：
 //   ① 写侧：usage.delta 分支必须调用 addDaily，且在轮关联之前（关联失败也不漏计）；
 //   ② 行为：从源码里抠出 dayKeyOf/loadDaily/saveDaily/addDaily/readToday 真跑一遍，
 //      验证跨午夜分桶、重复事件去重、30 天裁剪、损坏 JSON 容错；
 //   ③ 读侧：renderBar 必须经 readToday 取今日值，空态也要带总耗。
+//   ④ 会话累计：步数按 requestId 去重累计，快照 turns/requests 合并，渲染 N轮N步。
 //
 // 用法：node tests/tps_daily_smoke.js skills/zcode-tools/scripts/zcode-tps.js
 // 退出码 0 = 通过；1 = 有断言失败；2 = 用法/读取错误。
@@ -179,7 +180,7 @@ check(/const room = bBottom - h\.bottom - GAP_TARGET/.test(src),
 check(/now - host\._fitAt > 1000/.test(src),
       "缺重量节流，布局/窗口变化后补偿不会刷新");
 check(!/parentRowGap/.test(src), "旧的 parentRowGap 猜测式补偿应已移除");
-check(/scriptVersion = "3\.20-sink"/.test(src), "脚本版本号未同步到 3.20-sink");
+check(/scriptVersion = "3\.22-turnstep"/.test(src), "脚本版本号未同步到 3.22-turnstep");
 
 // ---------- ⑤ 早到 delta pending 回放 ----------
 // 首批带 input 的 delta 常早于 turnHeader/respTurn 桥接到达：必须暂存待回放，
@@ -218,6 +219,69 @@ check(/const snapHas = !!\(snap &&/.test(src),
       "数据态没认快照：重开旧会话只显示绿点，输入/输出/命中不出现");
 check(/const s = latest \? statsOf\(latest\)/.test(src),
       "无轮次但快照有量时会崩：statsOf(null)");
+
+// ---------- ⑧ 会话累计「N轮N步」 ----------
+// 轮=本会话完成轮数，步=完成模型请求数。锁四件事：轮记录有步数字段、轮复用会清、
+// 快照 turns/requests 能并入、渲染确实是 N轮N步；再把 applyUsage 抠出来真跑去重。
+check(/steps: 0, reqIds: null/.test(src), "轮记录缺 steps/reqIds，步数无法累计");
+check(/t\.steps = 0; t\.reqIds = null/.test(src), "resetTurnStats 没清步数，编辑重发会带旧值");
+check(/agg\.steps \+= t\.steps \|\| 0/.test(src), "会话累计没有汇总步数");
+check(/const snapRounds = \(snap\.turns \|\| 0\) \+ streamTurns/.test(src) &&
+      /const snapSteps = \(snap\.requests \|\| 0\) \+ streamSteps/.test(src),
+      "快照 turns/requests 没有并入轮/步累计");
+check(/span\(agg\.rounds \+ "轮"/.test(src) && /span\(agg\.steps \+ "步"/.test(src),
+      "状态栏没有渲染 N轮N步");
+check(/for \(const drop of \[7, 1, 2, 3\]\)/.test(src),
+      "降级顺序应把轮步排在最后(总耗→首token→tok/s→轮步)");
+
+function extractFn(name) {
+  const head = "function " + name + "(";
+  const i = src.indexOf(head);
+  if (i < 0) return null;
+  const braceStart = src.indexOf("{", i);
+  if (braceStart < 0) return null;
+  let depth = 0;
+  for (let j = braceStart; j < src.length; j++) {
+    const c = src[j];
+    if (c === "{") depth++;
+    else if (c === "}") {
+      depth--;
+      if (depth === 0) return src.slice(i, j + 1);
+    }
+  }
+  return null;
+}
+
+const fnSrc = extractFn("applyUsage");
+check(!!fnSrc, "源码里抠不出 applyUsage（函数被改名或删除了？）");
+if (fnSrc) {
+  let applyUsage = null;
+  try {
+    // eslint-disable-next-line no-eval
+    applyUsage = eval("(function(window){" + fnSrc + "; return applyUsage;})")({});
+  } catch (err) {
+    check(false, "applyUsage 源码无法求值", err.message);
+  }
+  if (typeof applyUsage === "function") {
+    const t = {
+      outputTokens: 0, inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+      reasoningTokens: 0, totalTokens: 0, steps: 0, reqIds: null,
+      modelId: null, sessionId: null, lastUsageAt: null,
+    };
+    applyUsage(t, { requestId: "r1", outputTokens: 1 });
+    applyUsage(t, { requestId: "r1", outputTokens: 1 });   // 重复投递/回放
+    check(t.steps === 1, "同一 requestId 被重复计数", "实得 " + t.steps);
+    check(t.outputTokens === 2, "去重不应吞掉用量累加", "实得 " + t.outputTokens);
+    applyUsage(t, { requestId: "r2", outputTokens: 1 });
+    check(t.steps === 2, "不同 requestId 应各计一步", "实得 " + t.steps);
+    applyUsage(t, { outputTokens: 1 });   // 老事件无 requestId
+    check(t.steps === 3, "无 requestId 的事件应按条计步", "实得 " + t.steps);
+    // 轮复用清空后，同一个 requestId 应能重新计数
+    t.steps = 0; t.reqIds = null;
+    applyUsage(t, { requestId: "r1", outputTokens: 1 });
+    check(t.steps === 1, "重置后同 requestId 应能重新计数", "实得 " + t.steps);
+  }
+}
 
 // ---------- 汇报 ----------
 if (failures.length) {

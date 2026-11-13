@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.31-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.32-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -9,7 +9,7 @@
 </p>
 
 为 ZCode 桌面客户端补齐极致原生体验与生产力增强：
-- 📊 **实时 TPS 与性能状态栏**：首 Token 延迟、tok/s 生成速度、会话输入/输出与平均命中率、今日总耗常驻展示。
+- 📊 **实时 TPS 与性能状态栏**：首 Token 延迟、tok/s 生成速度、会话轮数/步数、输入/输出与平均命中率、今日总耗常驻展示。
 - ✨ **提示词智能增强**：输入框旁一键重写润色草稿；**右键自由选择**润色所用模型，支持一键恢复。
 - 📈 **用量图表全量展开**：破除官方 Top 5/6 截断限制，全量展示所有模型的调用趋势与占比。
 - ⚡ **设置页模型自动拉取**：设置页一键获取供应商可用模型，批量同步写入配置。
@@ -44,7 +44,7 @@
 | 特性 | 功能名称 | 核心效果 | 改动范围 |
 |:---:|:---|:---|:---|
 | 🛡️ | **升级自动自愈** | 动态监控客户端与插件版本，升级后自动感知并调度看护静默修复 | 状态监控器 |
-| 📊 | **实时 TPS 状态栏** | 输入框常驻：即时指标（首 token / tok/s）+ 会话累计（输入 / 输出 / 平均命中）+ 今日总耗，右键自由切换位置 | `app.asar` 注入脚本 |
+| 📊 | **实时 TPS 状态栏** | 输入框常驻：即时指标（首 token / tok/s）+ 会话累计（N轮N步 / 输入 / 输出 / 平均命中）+ 今日总耗，右键自由切换位置 | `app.asar` 注入脚本 |
 | ✨ | **提示词增强润色** | 输入框旁「增强提示词」按钮，右键支持按供应商自选润色模型，持久化且免重启 | `app.asar` 注入脚本 + IPC |
 | 📈 | **用量图表去截断** | 「设置 → 用量」趋势图与饼图不再被 Top 5 / Top 6 截断，全量展示所有模型 | `app.asar` 渲染层 |
 | ⚡ | **设置页模型拉取** | 设置页新增「⚡ 自动拉取模型」按钮，自动从供应商同步可用模型并批量写入 | `app.asar` 注入脚本 + IPC |
@@ -151,6 +151,13 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.32（状态栏新增会话轮数/步数）
+- **会话累计新增「N轮N步」**：轮=当前会话已完成轮数（快照 `count(distinct turn_id)`），步=已完成模型请求数（`count(*)`，一次模型请求=一步，含工具调用链）；事件流按 `usage.delta.requestId` 去重实时累加，快照按 `Math.max` 补历史，重开旧会话/轮次滚出视口也能显示完整值；
+- **流式补差**：快照只在轮末由 `Stop` 钩子写入，流式中的轮一定还没落库，合并时把它补回快照基线，重开旧会话后首轮也能立即 `+1`；
+- **展示层**：段位在会话累计组最前（`29轮671步 · 输入 …`），不改变输入/输出/平均命中/总耗口径；窄窗渐进降级顺序变为 总耗 → 首 token → tok/s → 轮步；
+- **诊断**：`__ztpsDiag.aggRounds/aggSteps/snapTurns/snapRequests`；
+- **测试**：新增步数 `requestId` 去重、快照合并、`N轮N步` 渲染断言，全量 312 项通过。
 
 #### 0.6.31（回滚 0.6.30 的状态栏外观改动，恢复 0.6.29 样式）
 - 0.6.30 的 DeepSeek 风重构（透明单行 / 线性图标 / 统一灰 / 无胶囊底）整体撤回，状态栏恢复为 0.6.25~0.6.29 的浅灰胶囊 + 绿点 + `·`/`│` 分组样式；

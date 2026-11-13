@@ -1603,11 +1603,13 @@ class TestTpsSidePaneIsolation(unittest.TestCase):
         self.assertIn("isInsideSidePane(sc)", self.src)
 
     def test_tps_bar_layout_session_io_and_daily_total(self):
-        """TPS 状态栏布局：即时(首 token/tok/s) + 会话累计(输入/输出/平均命中) + 今日总耗。
+        """TPS 状态栏布局：即时(首 token/tok/s) + 会话累计(轮数/步数/输入/输出/平均命中) + 今日总耗。
 
-        已删除：第 N 轮、总用、命中绝对值、累思、思考显示；累出改名为输出。
+        已删除：总用、命中绝对值、累思、思考显示；累出改名为输出；当前会话累计恢复「N轮N步」。
         """
         for label in ('span("输入 ")', 'span("输出 ")', "平均命中", 'span("总耗 ")',
+                      'agg.rounds + "轮"', 'agg.steps + "步"', "agg.steps",
+                      "snap.turns", "snap.requests",
                       "fmtPct", "DAILY_KEY", "addDaily", "readToday"):
             self.assertIn(label, self.src, f"状态栏必须包含 {label}")
         for gone in ('span("总用 ")', 'span("out ")', 'span("累出 ")', "累思",
