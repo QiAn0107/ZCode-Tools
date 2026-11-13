@@ -178,7 +178,8 @@ def main(argv: list[str] | None = None, quiet: bool = False) -> int:
         con = connect_ro(db)
     except Exception as e:
         say(f"[!] 读不到用量库 {db}: {e}")
-        return 1
+        # 钩子模式（--quiet）不得以非零码退出：那会被判为钩子失败并在每轮刷错误日志
+        return 0 if quiet else 1
     try:
         if args.check:
             tables = [r[0] for r in con.execute(
@@ -202,7 +203,7 @@ def main(argv: list[str] | None = None, quiet: bool = False) -> int:
         return 0
     except Exception as e:
         say(f"[!] 快照失败: {e!r}")
-        return 1
+        return 0 if quiet else 1
     finally:
         try:
             con.close()

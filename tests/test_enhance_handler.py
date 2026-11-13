@@ -484,12 +484,13 @@ class TestListModelsMode(EnhanceHandlerTestBase):
 
 
 class TestListModelsCompleteness(EnhanceHandlerTestBase):
-    """`{list:true}` 清单完整性（0.6.25）：菜单必须与设置页实际一致。
+    """`{list:true}` 清单完整性（0.6.25 / 0.6.27）。
 
-    回归的三类真实缺口（见脱敏诊断）：
-      ① config.json 独有模型被 pid 级丢弃（合并改为模型级）；
-      ② 空模型组渲染"没有可用模型"占位（改为整组隐藏）；
-      ③ 跨供应商重名模型无法区分（打 dup 标记，渲染层追加供应商后缀）。
+    回归的真实缺口（见脱敏诊断）：
+      ① 空模型组渲染"没有可用模型"占位（改为整组隐藏）；
+      ② 跨供应商重名模型无法区分（打 dup 标记，渲染层追加供应商后缀）；
+      ③ **0.6.27 反转**：旧格式 config.json 不再给权威源补模型 —— 实测 chat 侧
+         config.json 多出 11 个设置页里根本不存在的模型，正是「关了还在列表里」的来源。
     外加 systemDisabledReason 在权威源漏拷的过滤回归。
     """
 
@@ -538,11 +539,16 @@ class TestListModelsCompleteness(EnhanceHandlerTestBase):
         self.assert_request_count(0)
         return {g["providerId"]: g for g in r.get("groups") or []}
 
-    def test_config_only_models_are_merged(self):
-        """config.json 独有模型必须并入同 pid 分组（模型级合并）。"""
+    def test_config_only_models_are_not_merged(self):
+        """权威源的模型集合已与设置页同源，旧格式 config.json 不再补模型。
+
+        实测 chat 供应商 config.json 有 30 个模型、设置页只列 19 个（模板内置），
+        把 config 独有的并进来就会重新出现「设置里没有、菜单里却有」的模型。
+        """
         g = self._groups()[self.PROVIDER_B]
         ids = sorted(m["id"] for m in g["models"])
-        self.assertEqual(ids, ["only-b", "only-cfg", "shared-model"])
+        self.assertEqual(ids, ["only-b", "shared-model"],
+                         "config.json 独有模型（only-cfg）不该再出现在菜单里")
 
     def test_empty_group_is_hidden(self):
         """空模型组整组不出现（不再渲染占位文案）。"""
@@ -561,6 +567,123 @@ class TestListModelsCompleteness(EnhanceHandlerTestBase):
     def test_disabled_provider_is_filtered(self):
         """systemDisabledReason 供应商必须被过滤（权威源漏拷回归）。"""
         self.assertNotIn(self.PROVIDER_DISABLED, self._groups())
+
+
+class TestEnabledFiltering(EnhanceHandlerTestBase):
+    """三层启用状态（0.6.27）：菜单必须与设置页的开关完全一致。
+
+    现场症状（用户实测）：
+      * 火山方舟 Agent Plan 在设置页**整组关闭**，菜单里仍然出现；
+      * 小米 MiMo Token Plan 的 personalModelIds 为空（模型只在 builtin 模板里）→ 整组消失；
+      * 设置页里被关掉的模型（providerModelRules.enabled=false）仍全部列在菜单里。
+
+    客户端把开关拆成三层，缺任何一层都会错：
+      ⓐ providerRules[].enabled === false       → 整个供应商关闭
+      ⓑ providerModelRules[].config.enabled     → 单模型用户开关
+      ⓒ zcode-builtin.json:
+           templateRules[].builtinModelIds       → 模板自带模型（小米唯一来源）
+           templateModelRules[].config.enabled   → 用户没动过的模型的默认开关
+    生效顺序：ⓑ > ⓒ > 视作开启。
+    """
+
+    PROVIDER_OFF = "prov-off-0010"
+    PROVIDER_TPL = "prov-tpl-0011"
+
+    def setUp(self):
+        super().setUp()
+        pcp = self.root / "provider_config.json"
+        cfg = json.loads(pcp.read_text(encoding="utf-8"))
+        rules = cfg["config"]["providerConfigRules"]["providerRules"]
+        # ⓐ 整组关闭的供应商（火山式）：凭据齐全，但 providerRules.enabled=false
+        rules.append(
+            {"providerId": self.PROVIDER_OFF, "providerName": "关闭供应商",
+             "enabled": False,
+             "config": {"access": {"apiKey": "sk-off"},
+                        "api": {"baseUrl": self.base_url, "type": "openai-compatible"},
+                        "personalModelIds": ["m-off"]}})
+        # ⓒ 模板供应商（小米式）：personalModelIds 为空、rule 里没有 baseUrl/type
+        rules.append(
+            {"providerId": self.PROVIDER_TPL, "providerName": "模板供应商",
+             "templateId": "tpl-x",
+             "config": {"access": {"apiKey": "sk-tpl"},
+                        "api": {},
+                        "personalModelIds": []}})
+        # ⓑ prov-ok 里放一个被用户关掉的模型
+        rules[0]["config"]["personalModelIds"].append("model-off")
+        cfg["config"]["modelConfigRules"]["providerModelRules"] = [
+            {"providerId": self.PROVIDER_OK, "modelId": "model-off",
+             "config": {"enabled": False}},
+            # 模板默认关、用户显式打开 → 必须出现
+            {"providerId": self.PROVIDER_TPL, "modelId": "tpl-forced-on",
+             "config": {"enabled": True}},
+            {"providerId": self.PROVIDER_TPL, "modelId": "tpl-off",
+             "config": {"enabled": False}},
+        ]
+        pcp.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+
+        # 内置模板 fixture：规则里缺的 baseUrl/type 与模型清单都只在这里
+        rt = (self.root / "runtime" / "provider" / "win32-x64"
+              / "3.17.2" / "endpoint-abc")
+        rt.mkdir(parents=True, exist_ok=True)
+        (rt / "zcode-builtin.json").write_text(json.dumps({
+            "config": {
+                "providerConfigRules": {"templateRules": [
+                    {"templateId": "tpl-x",
+                     "config": {"api": {"type": "openai-chat-completions",
+                                        "baseUrl": self.base_url},
+                                "builtinModelIds": ["tpl-on", "tpl-off",
+                                                    "tpl-default-off", "tpl-forced-on"]}},
+                ]},
+                "modelConfigRules": {"templateModelRules": [
+                    {"templateId": "tpl-x", "modelId": "tpl-on",
+                     "config": {"enabled": True}},
+                    {"templateId": "tpl-x", "modelId": "tpl-off",
+                     "config": {"enabled": False}},
+                    {"templateId": "tpl-x", "modelId": "tpl-default-off",
+                     "config": {"enabled": False}},
+                    {"templateId": "tpl-x", "modelId": "tpl-forced-on",
+                     "config": {"enabled": False}},
+                ]},
+            }}, ensure_ascii=False), encoding="utf-8")
+        self.remove_hot()
+
+    def _groups(self):
+        r = self.h.run(list_only=True)
+        self.assertTrue(r.get("success"), f"应成功: {r}")
+        self.assert_request_count(0)
+        return {g["providerId"]: g for g in r.get("groups") or []}
+
+    def test_disabled_provider_is_hidden(self):
+        """providerRules.enabled=false 必须整组隐藏（火山现场症状）。"""
+        self.assertNotIn(self.PROVIDER_OFF, self._groups())
+
+    def test_disabled_model_is_hidden(self):
+        """providerModelRules.enabled=false 的模型不能出现在菜单里。"""
+        ids = [m["id"] for m in self._groups()[self.PROVIDER_OK]["models"]]
+        self.assertNotIn("model-off", ids, "用户关掉的模型不该出现")
+        self.assertEqual(sorted(ids), ["model-a", "model-b"])
+
+    def test_template_models_fill_empty_provider(self):
+        """personalModelIds 为空时，模型清单来自模板 builtinModelIds（小米现场症状）。"""
+        g = self._groups().get(self.PROVIDER_TPL)
+        self.assertIsNotNone(g, "模板自带模型的供应商必须出现（否则小米整组消失）")
+        ids = sorted(m["id"] for m in g["models"])
+        self.assertEqual(ids, ["tpl-forced-on", "tpl-on"],
+                         "只保留开启的：模板默认开(tpl-on)、用户强开(tpl-forced-on)；"
+                         "模板默认关(tpl-default-off)与用户关(tpl-off)必须隐藏")
+
+    def test_template_base_url_is_used_as_fallback(self):
+        """rule 里缺 baseUrl/type 时回退模板 —— 菜单出现即证明 usable() 通过。"""
+        self.assertIn(self.PROVIDER_TPL, self._groups())
+
+    def test_template_provider_can_actually_be_called(self):
+        """端到端：模板供应商必须能真的发出请求（baseUrl/协议取自模板）。"""
+        r = self.h.run(text="hi", model_value="", model_label="",
+                       override={"providerId": self.PROVIDER_TPL,
+                                 "modelId": "tpl-on"})
+        self.assertTrue(r.get("success"), f"应成功: {r}")
+        self.assertEqual(r.get("model"), "tpl-on")
+        self.assertEqual(self.last_body().get("model"), "tpl-on")
 
 
 class TestSaveModelHandler(EnhanceHandlerTestBase):
@@ -1009,6 +1132,64 @@ class TestDoctorMirrorsHandler(unittest.TestCase):
         pick, how, _ = self.doc.resolve(cands, by_id, "m3", "")
         self.assertEqual(how, "label")
         self.assertEqual((pick["pid"], pick["mid"]), ("p2", "m3"))
+
+    def test_build_candidates_applies_enabled_and_templates(self):
+        """doctor 的候选表必须复刻三层开关（否则排障结论会与菜单相反）。"""
+        import tempfile as _tf
+        with _tf.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "provider_config.json").write_text(json.dumps({
+                "config": {
+                    "providerConfigRules": {"providerRules": [
+                        {"providerId": "off", "providerName": "关闭", "enabled": False,
+                         "config": {"access": {"apiKey": "k"},
+                                    "api": {"baseUrl": "http://x/v1",
+                                            "type": "openai-chat-completions"},
+                                    "personalModelIds": ["m-off"]}},
+                        {"providerId": "tpl", "providerName": "模板",
+                         "templateId": "tpl-x",
+                         "config": {"access": {"apiKey": "k"}, "api": {},
+                                    "personalModelIds": []}},
+                    ]},
+                    "modelConfigRules": {"providerModelRules": [
+                        {"providerId": "tpl", "modelId": "forced",
+                         "config": {"enabled": True}},
+                        {"providerId": "tpl", "modelId": "off2",
+                         "config": {"enabled": False}},
+                    ]},
+                }}, ensure_ascii=False), encoding="utf-8")
+            rt = root / "runtime" / "provider" / "win" / "3.17.2" / "endpoint-a"
+            rt.mkdir(parents=True)
+            (rt / "zcode-builtin.json").write_text(json.dumps({
+                "config": {
+                    "providerConfigRules": {"templateRules": [
+                        {"templateId": "tpl-x", "config": {
+                            "api": {"type": "openai-chat-completions",
+                                    "baseUrl": "http://y/v1"},
+                            "builtinModelIds": ["on", "off2", "forced", "defoff"]}}]},
+                    "modelConfigRules": {"templateModelRules": [
+                        {"templateId": "tpl-x", "modelId": "on",
+                         "config": {"enabled": True}},
+                        {"templateId": "tpl-x", "modelId": "off2",
+                         "config": {"enabled": False}},
+                        {"templateId": "tpl-x", "modelId": "forced",
+                         "config": {"enabled": False}},
+                        {"templateId": "tpl-x", "modelId": "defoff",
+                         "config": {"enabled": False}},
+                    ]},
+                }}, ensure_ascii=False), encoding="utf-8")
+            _cands, by_id, _notes, _stats = self.doc.build_candidates(root)
+        self.assertEqual(by_id["off"]["systemDisabledReason"], "provider_disabled",
+                         "整组关闭的供应商必须带关闭原因（resolve 的 usable() 据此排除）")
+        # 关闭的供应商不得被任何档位选中
+        _pick, how, _tried = self.doc.resolve(
+            _cands, by_id, "off/m-off", "m-off")
+        self.assertNotEqual(how, "ref", "关闭供应商的模型不能被 ref 档选中")
+        self.assertEqual(sorted(by_id["tpl"]["models"]), ["forced", "on"],
+                         "用户规则优先于模板默认；关闭的模型都要剔除")
+        self.assertEqual(by_id["tpl"]["baseURL"], "http://y/v1",
+                         "rule 缺 baseUrl 时必须回退模板")
+        self.assertEqual(by_id["tpl"]["kind"], "openai-compatible")
 
     def test_tier_order_matches_handler_source(self):
         """doctor 的行为顺序必须与 handler 源码顺序同构。"""

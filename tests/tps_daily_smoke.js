@@ -155,15 +155,24 @@ check(src.indexOf('"empty|" + today.key + "|" + today.total') >= 0,
       "空态签名没有带今日值，空会话下今日变化不会刷新");
 check((src.match(/总耗 /g) || []).length >= 2, "有数据态与空态应都有「总耗」显示");
 
-// ---------- ④ composer-below 自适应 gap 补偿 ----------
-// host 作为新 flex 项会把父容器一份纵向 gap 变成两份，下半份暴露为胶囊下方留白。
-// 锁三件事：有 rowGap 读数 helper、有负 marginBottom 补偿、有 gap 变化过期刷新。
-check(/function parentRowGap\(el\)/.test(src), "缺 parentRowGap helper，无法读取父容器纵向 gap");
-check(/host\.style\.marginBottom = \(-gap\) \+ "px"/.test(src),
-      "composer-below 没有负 marginBottom 补偿，下方留白会回来");
-check(/host\._gapv !== parentRowGap\(/.test(src),
-      "缺 gap 变化过期检查，主题/版本切换改 gap 后补偿会过期");
-check(/scriptVersion = "3\.17-snap"/.test(src), "脚本版本号未同步到 3.17-snap");
+// ---------- ④ composer-below 自适应间距补偿 ----------
+// 不猜布局（gap / space-y / margin 各版本不同），直接量像素：上沿↔卡片下沿、
+// 下沿↔下一元素，用负 margin 抵消到 GAP_TARGET。锁四件事：
+// 有测量 helper、有目标值、上下两侧都补偿、有节流重量。
+check(/const GAP_TARGET = \d+/.test(src), "缺 GAP_TARGET，视觉间距没有目标值");
+check(/function fitGap\(host, card\)/.test(src), "缺 fitGap helper，无法按实测像素补偿间距");
+check(/px\(host\.style\.marginTop\) - topErr/.test(src),
+      "上侧必须按「当前 margin - 实测偏差」增量修正，绝对值反算会自激振荡");
+check(/px\(host\.style\.marginBottom\) - Math\.min\(botErr, cap\)/.test(src),
+      "下侧补偿必须按「实测偏差」增量修正且以 cap 封顶");
+check(/const cap = Math\.max\(0, rawTop\)/.test(src),
+      "缺 cap 上限，会吞掉应用自己的下边距把其它元素往上拽");
+check(/Math\.abs\(topErr\) > 0\.5/.test(src) && /botErr > 0\.5/.test(src),
+      "缺收敛阈值，稳定后仍会每秒写样式");
+check(/now - host\._fitAt > 1000/.test(src),
+      "缺重量节流，布局/窗口变化后补偿不会刷新");
+check(!/parentRowGap/.test(src), "旧的 parentRowGap 猜测式补偿应已移除");
+check(/scriptVersion = "3\.18-live"/.test(src), "脚本版本号未同步到 3.18-live");
 
 // ---------- ⑤ 早到 delta pending 回放 ----------
 // 首批带 input 的 delta 常早于 turnHeader/respTurn 桥接到达：必须暂存待回放，
@@ -184,6 +193,10 @@ check(/snapToday > today\.total/.test(src),
       "今日侧没有取 max(localStorage, 快照today)");
 check(/_snapCache\.stamp\]\.join/.test(src), "内容签名缺快照 stamp，快照到达不会重绘");
 check(/snapshotHit/.test(src), "diag 缺 snapshotHit，快照是否命中无法定位");
+check(/snapshotErr/.test(src), "diag 缺 snapshotErr，快照失败原因无法定位");
+// 轮次结束=DB 落库完成，必须立刻让缓存过期，否则结算值要等 3s TTL 才可见
+check(/if \(!t\.streaming\) _snapCache\.at = 0/.test(src),
+      "轮次结束没有失效快照缓存，本轮结算值要等 TTL 才显示");
 
 // ---------- 汇报 ----------
 if (failures.length) {

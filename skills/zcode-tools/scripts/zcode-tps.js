@@ -136,10 +136,11 @@
   // (会话输入/输出/命中/今日的官方落库精确值，天然全历史)。
   // 口径移植自 xhwxt/zcode-token-usage-statusbar (MIT)：completed 才计、
   // 合计=computed_total、命中=cache_read/input。
-  // 快照由 Python 侧(tps_snapshot.py)经 sync/看护触发点写入，main 经
-  // zcode:tps-snapshot IPC 只读回传；此处 5s TTL 缓存，失败静默降级为纯事件流。
-  const SNAP_TTL_MS = 5000;
-  let _snapCache = { at: 0, ok: false, stamp: 0, sessions: null, today: null, pending: false };
+  // 快照由 Python 侧(tps_snapshot.py)在 SessionStart / 每轮结束(Stop 钩子) / 看护写入，
+  // main 经 zcode:tps-snapshot IPC 只读回传；此处 3s TTL 缓存，轮次结束强制失效，
+  // 失败静默降级为纯事件流。
+  const SNAP_TTL_MS = 3000;
+  let _snapCache = { at: 0, ok: false, err: null, stamp: 0, sessions: null, today: null, pending: false };
   function refreshSnapshot() {
     const now = Date.now();
     if (_snapCache.pending || now - _snapCache.at < SNAP_TTL_MS) return;
@@ -155,14 +156,17 @@
           _snapCache.at = Date.now();
           if (r && r.success && r.sessions && r.today) {
             _snapCache.ok = true;
+            _snapCache.err = null;
             _snapCache.stamp = r.stamp || 0;
             _snapCache.sessions = r.sessions;
             _snapCache.today = r.today;
             scheduleScan();
+          } else if (r) {
+            _snapCache.err = r.code || "bad-response";
           }
-        }, () => { _snapCache.pending = false; _snapCache.at = Date.now(); });
+        }, () => { _snapCache.pending = false; _snapCache.at = Date.now(); _snapCache.err = "rejected"; });
       } else { _snapCache.pending = false; _snapCache.at = now; }
-    } catch (err) { _snapCache.pending = false; _snapCache.at = now; }
+    } catch (err) { _snapCache.pending = false; _snapCache.at = now; _snapCache.err = "throw"; }
   }
   const snapSession = (sid) => {
     if (!_snapCache.ok || !sid || !_snapCache.sessions) return null;
@@ -376,6 +380,8 @@
       t.activeMs = row.activeMs ?? t.activeMs;
       t.modelDurationMs = row.modelDurationMs ?? t.modelDurationMs;
       t.streaming = row.state != null && !/^(completedSuccess|completed|failed|stopped|cancelled)/.test(row.state);
+      // 轮次结束=DB 落库完成：立刻让快照缓存过期，下一次扫描取到本轮结算值
+      if (!t.streaming) _snapCache.at = 0;
       if (row.sourceCommandId) { t.sourceCommandId = row.sourceCommandId; replayPending(row.sourceCommandId, t); }
       scheduleScan();
     } else if (row.kind === "userInput") {
@@ -694,7 +700,7 @@
   let diag = null;
   try {
     diag = window.__ztpsDiag = window.__ztpsDiag || {};
-    diag.scriptVersion = "3.17-snap";
+    diag.scriptVersion = "3.18-live";
     diag.loadedAt = new Date().toISOString();
   } catch (err) { /* ignore */ }
 
@@ -704,25 +710,55 @@
   //   toolbar:        工具栏行内水平居中
   //   session-top:    消息区滚动容器首子元素,sticky 吸顶;负 margin-bottom 抵消文档流占位,
   //                   host 上 pointer-events:none 放行下方消息,胶囊本体恢复 auto
-  // 父容器纵向 gap 读数(px,解析失败/非 flex 返回 0):composer-below 的 gap 补偿用
-  function parentRowGap(el) {
-    if (!el || typeof getComputedStyle !== "function") return 0;
+  // composer-below 的纵向间距：不猜布局（gap / space-y / margin 各家不同），
+  // 直接量「胶囊上沿到卡片下沿」「胶囊下沿到下一元素」的实际像素，用等量负 margin 抵消，
+  // 使视觉间距恒为 GAP_TARGET。布局变更/窗口缩放后再量一次即自适应。
+  const GAP_TARGET = 2;   // 目标视觉间距(px)
+  const px = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; };
+  function fitGap(host, card) {
+    if (!host || !card || !host.isConnected || !card.isConnected) return;
     try {
-      const cs = getComputedStyle(el);
-      const disp = cs.display || "";
-      if (disp.indexOf("flex") < 0 && disp.indexOf("grid") < 0) return 0;
-      const raw = cs.rowGap && cs.rowGap !== "normal" ? cs.rowGap : cs.gap;
-      const v = parseFloat(raw);
-      return Number.isFinite(v) && v > 0 ? v : 0;
-    } catch (err) { return 0; }
+      // 增量累积修正：测量值本身包含上一次的 margin，必须「当前 margin - 实测偏差」，
+      // 不能用绝对值反算（否则会在 0 与 -gap 之间自激振荡）。一次收敛，之后偏差≈0 不再写样式。
+      const c = card.getBoundingClientRect();
+      let h = host.getBoundingClientRect();
+      // 布局原生的上方空白 = 实测 - 我们已加的 margin。它同时是「下方最多能抵消多少」的上限：
+      // 我们只撤掉自己插入带来的那一份空白，绝不吞掉应用自己的下边距/元素间距。
+      const rawTop = (h.top - c.bottom) - px(host.style.marginTop);
+      const cap = Math.max(0, rawTop);
+      const topErr = (h.top - c.bottom) - GAP_TARGET;   // 正=还太远 负=贴太近
+      if (Math.abs(topErr) > 0.5) {
+        host.style.marginTop = (px(host.style.marginTop) - topErr) + "px";
+        h = host.getBoundingClientRect();               // 立即回流，取补偿后的真实位置
+      }
+      // 下方空白：有兄弟节点量到兄弟上沿，否则量到父容器内容区底(扣掉 padding)
+      const nx = host.nextElementSibling;
+      let limit;
+      if (nx) {
+        limit = nx.getBoundingClientRect().top;
+      } else {
+        const p = host.parentElement;
+        const pcs = getComputedStyle(p);
+        limit = p.getBoundingClientRect().bottom - (parseFloat(pcs.paddingBottom) || 0);
+      }
+      const botErr = limit - h.bottom;                  // 正=下方还有空白 负=已重叠
+      if (botErr > 0.5) {
+        host.style.marginBottom = (px(host.style.marginBottom) - Math.min(botErr, cap)) + "px";
+      } else if (botErr < -0.5) {
+        // 补偿过头（布局变更）：最多退回 cap，不动应用自身布局
+        host.style.marginBottom = (px(host.style.marginBottom) + Math.min(-botErr, cap)) + "px";
+      }
+    } catch (err) { /* 静默 */ }
   }
   function attach(host, mode) {
     const changed = host.getAttribute("data-ztps-mode") !== mode;
     // 快路径：宿主已在文档树中、模式未变、且处于正确的父/兄弟节点下，无需重新查找 composer，0开销返回
     if (!changed && host.isConnected && host._target && host._target.isConnected) {
       if (mode === "composer-below" && host.previousElementSibling === host._target) {
-        // gap 补偿过期检查：父容器 gap 变化（主题/版本切换）时重进挂载分支刷新补偿
-        if (host._gapv === parentRowGap(host.parentElement)) return true;
+        // 低频重量：布局(gap 变化/窗口缩放/主题切换)漂移后自动重新对齐，1s 节流
+        const now = Date.now();
+        if (!host._fitAt || now - host._fitAt > 1000) { fitGap(host, host._target); host._fitAt = now; }
+        return true;
       }
       if (mode === "session-top" && host.parentElement === host._target) return true;
       if (mode === "toolbar" && host.parentElement === host._target) return true;
@@ -730,24 +766,19 @@
     if (mode === "composer-below") {
       const card = findComposerCard();
       if (!card || !card.parentElement || isInsideSidePane(card)) return false;
-      if (changed || host.parentElement !== card.parentElement || host.previousElementSibling !== card
-          || host._gapv !== parentRowGap(card.parentElement)) {
+      if (changed || host.parentElement !== card.parentElement || host.previousElementSibling !== card) {
         card.insertAdjacentElement("afterend", host);
         host.setAttribute("data-ztps-mode", mode);
         host.style.cssText = "";
         Object.assign(host.style, {
           display: "flex", justifyContent: "center",
           alignItems: "center",
-          marginTop: "6px", padding: "0",
+          marginTop: "0", marginBottom: "0", padding: "0",
           alignSelf: "stretch",          // 与 composer 卡片同宽
           pointerEvents: "auto",
         });
-        // 自适应 gap 补偿：host 作为新 flex 项把父容器一份纵向 gap 变成两份，
-        // 下半份暴露为胶囊下方留白；读父容器 rowGap 并以等量负 marginBottom 抵消。
-        // 解析失败/0 则不动（老布局/非 flex 父容器无回归）。
-        const gap = parentRowGap(card.parentElement);
-        host._gapv = gap;
-        if (gap > 0) host.style.marginBottom = (-gap) + "px";
+        // 插入完成后量一次实际空白并抵消（rAF 保证拿到最终布局）
+        try { requestAnimationFrame(() => { fitGap(host, card); host._fitAt = Date.now(); }); } catch (err) { /* 静默 */ }
       }
       host._target = card;
     } else if (mode === "session-top") {
@@ -862,7 +893,10 @@
         diag.pendingUsageSize = pendingUsage.size;
         diag.appliedFromPending = appliedFromPending;
         diag.snapshotHit = !!snap;
+        diag.snapshotOk = _snapCache.ok;
+        diag.snapshotErr = _snapCache.err;
         diag.snapshotTs = _snapCache.stamp || 0;
+        diag.snapshotToday = snapToday;
         diag.snapshotAge = _snapCache.ok ? (Date.now() - _snapCache.at) : -1;
         if (latest) {
           diag.latest = {

@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.26-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.27-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -151,6 +151,14 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.27（修复输入/命中不显示、今日总耗不变化、状态栏下方间距、增强菜单与实际模型列表不符）
+- **增强菜单与设置页开关逐项一致**：补上客户端的三层启用状态 —— ①`providerRules[].enabled=false` 整组关闭（火山方舟 Agent Plan 关了仍显示）；②`providerModelRules[].config.enabled=false` 单模型关闭（关掉的模型仍在列表）；③内置模板 `zcode-builtin.json` 的 `builtinModelIds` + `templateModelRules` 默认开关（小米 MiMo Token Plan 的 `personalModelIds` 为空，模型只在模板里 → 整组消失）。生效顺序：用户规则 > 模板默认 > 开启；`baseUrl`/`type` 缺失时回退模板（Responses 组不再需要借道 Chat）；旧格式 `config.json` 不再给权威源补模型（chat 侧多出的 11 个设置页不存在的模型即「关了还在」的来源）；
+- **快照 IPC handler 参数误用（输入/命中缺失真因）**：`ipcMain.handle` 的第二参数是渲染层实参，0.6.26 却当 `path` 模块调 `.join()`；preload 不传参 → `undefined` → 每次调用抛 TypeError → 永远返回 `read-failed`，快照回填整条链路静默失效。改用 `import` 进来的 `r`，并加「真跑 handler 读真实快照」回归测试；
+- **今日总耗不再冻在会话开始**：新增 `Stop` 钩子，每轮结束跑 `tps_snapshot.py --quiet` 刷新结算快照（DB 只有轮末落库）；渲染层 3s TTL 且轮次结束强制失效，本轮结算值即时可见；
+- **状态栏下方间距按实测像素对齐**：不再猜父容器 `gap`（`space-y-*`/margin 布局读不到，0.6.25 方案会静默失效），改为量「胶囊上沿↔卡片下沿」「下沿↔下一元素」并用增量 margin 抵到 2px，偏差 <0.5px 停写、1s 节流重量；
+- **诊断**：`__ztpsDiag` 新增 `snapshotOk/snapshotErr/snapshotToday`，失败原因可直接定位（`read-failed` / `no-snapshot` / 无桥）；
+- **测试**：新增 handler 真跑回归 + `Stop` 钩子断言 + 间距增量修正断言 + 三层开关/模板回退回归，全量 312 项通过。
 
 #### 0.6.26（TPS 双源混合：事件流实时 + DB 快照结算）
 - **输入/命中缺失根治**：早到 `usage.delta` 暂存 `pendingUsage` 待桥接建成后回放（不再丢弃），`resetTurnStats` 追加清理会话/命令 ID，`diag` 新增 pending 计数；

@@ -43,6 +43,10 @@ ZCode 客户端补丁工具
   在按钮上右键弹出模型选择菜单（按供应商分组，只列可用模型）：选中即写进
   enhance_config.json（零重启生效、重启后沿用），本次点击同时经 override 参数走
   explicit 档（最高优先级），文件写入失败也不会用错模型。
+  菜单的模型清单与设置页开关逐项一致（0.6.27）：供应商 providerRules.enabled===false
+  整组隐藏；providerModelRules.config.enabled===false 的单模型隐藏；personalModelIds
+  为空时从内置模板 zcode-builtin.json 取 builtinModelIds，用户没动过的模型按
+  templateModelRules 的默认开关决定；baseUrl/type 缺失时回退模板。
   模型解析共六档：explicit → config → ref → ref-label → label → fallback。
   提示词模板内置：保持原语言、只输出改写结果、不回答问题、不加解释。四组件注入与还原走与模型拉取按钮同一套通用链路
   （_process_ipc_patch），preload/main 注入段按 /*zp:begin:<块名>*/ 标记定界，两者互不干扰。
@@ -1117,7 +1121,7 @@ let{default:n}=await import("node:fs"),{default:r}=await import("node:path"),{de
 let base=i.homedir();
 try{let s=JSON.parse(n.readFileSync(r.join(base,".zcode","v2","setting.json"),"utf-8"));
 if(s&&typeof s.dataBaseDir=="string"&&s.dataBaseDir.trim())base=s.dataBaseDir.trim()}catch(_){}
-let root=t.join(base,".zcode","v2"),f=t.join(root,"ztps-snapshot.json");
+let root=r.join(base,".zcode","v2"),f=r.join(root,"ztps-snapshot.json");
 let snap=null;
 try{snap=JSON.parse(n.readFileSync(f,"utf-8"))}catch(_){snap=null}
 if(!snap||typeof snap!="object"||!snap.sessions||!snap.today){
@@ -1234,11 +1238,55 @@ let root=r.join(base,".zcode","v2");
 // 因此这里先把 provider_config.json 归一化成统一的候选表，必要时再用 config.json 补缺。
 // ============================================================
 function rd(p){try{return JSON.parse(n.readFileSync(p,"utf-8"))}catch(_){return null}}
+// 内置模板：客户端把「模板自带模型 + 每模型默认开关」放在
+// <root>/runtime/provider/<platform>/<version>/endpoint-*/zcode-builtin.json。
+// 自定义供应商的 personalModelIds 可能为空（小米 MiMo 就是这样，模型只在模板里），
+// 不带模板就整组看不见；模板还会给出用户没动过的模型的默认开关（= 设置页的灰/绿）。
+function findBuiltinTpl(){
+let out=null,outv=null;
+function cmpv(a,b){let n2=Math.max(a.length,b.length);for(let i=0;i<n2;i++){let x=a[i]||0,y=b[i]||0;if(x!==y)return x-y}return 0}
+function walk(p2,depth){
+if(depth>4)return;
+let ents=[];try{ents=n.readdirSync(p2,{withFileTypes:!0})}catch(_){return}
+for(let e of ents){
+let fp=r.join(p2,e.name);
+if(e.isDirectory()){walk(fp,depth+1);continue}
+if(e.name!=="zcode-builtin.json")continue;
+// 版本取路径里最后一个 x.y 段；多版本并存时用最新的那份
+let seg=String(p2).replace(/\\\\/g,"/").split("/"),vs=null;
+for(let i=seg.length-1;i>=0;i--){
+if(/^\\d+\\.\\d+/.test(seg[i])){vs=seg[i].split(".").map(function(x){return parseInt(x,10)||0});break}}
+if(vs&&(!outv||cmpv(vs,outv)>0)){outv=vs;out=fp}}}
+walk(r.join(root,"runtime","provider"),0);
+return out}
 // ⓪ 增强专用热配置 <root>/enhance_config.json：每次点击都重新读取，改文件即生效、无需重启。
 //   providerId/modelId 留空或文件不存在时，行为与旧版完全一致（用界面当前选中的模型）。
 let cfg=rd(r.join(root,"enhance_config.json"))||{};
 let srcTried=[];
-// ① provider_config.json（权威）→ 归一化
+// ============================================================
+// ① 启用状态必须与设置页完全一致（0.6.27）。客户端把开关拆成三层，缺任何一层都会出现
+//   「设置里关了、菜单里还在」或「设置里开着、菜单里没有」：
+//   ⓐ providerRules[].enabled === false       → 整个供应商被关闭（火山方舟 Agent Plan）
+//   ⓑ providerModelRules[].config.enabled     → 单个模型的用户开关（关掉的不能进菜单）
+//   ⓒ zcode-builtin.json 的 templateRules.builtinModelIds
+//     + templateModelRules[].config.enabled  → 模板自带模型与默认开关（小米模型只在这里）
+//   生效顺序：用户规则 ⓑ > 模板默认 ⓒ > 视作开启（自定义供应商自己加的模型）。
+// ============================================================
+let tpls={},tplDefs={};
+try{
+let tfile=findBuiltinTpl();
+if(tfile){
+let bd=rd(tfile);
+if(bd){let bc=bd.config||bd;
+for(let t of ((bc.providerConfigRules||{}).templateRules)||[]){
+let tid=String(t.templateId||"");if(tid)tpls[tid]=t.config||{}}
+for(let t of ((bc.modelConfigRules||{}).templateModelRules)||[]){
+let tid=String(t.templateId||""),mid=String(t.modelId||"");
+if(!tid||!mid)continue;
+let cf=t.config||{};
+(tplDefs[tid]=tplDefs[tid]||{})[mid]=(cf.enabled!==!1)}}
+srcTried.push("templates:"+Object.keys(tpls).length)}
+}catch(_){srcTried.push("templates:err")}
 let pcCands=[];
 try{
 let p=d=>d&&d.config?d.config:d;
@@ -1251,18 +1299,40 @@ t=String(t||"").toLowerCase();
 if(t.indexOf("anthropic")>=0)return"anthropic";
 if(t.indexOf("openai")>=0||t.indexOf("chat-completions")>=0||t.indexOf("responses")>=0)return"openai-compatible";
 return"openai-compatible"}
-let pm={};
-for(let r2 of ((pc.modelConfigRules||{}).providerModelRules)||[]){
-let pid2=String(r2.providerId||"");if(!pid2)continue;
-(pm[pid2]=pm[pid2]||[]).push(String(r2.modelId||""))}
+let pmRules=((pc.modelConfigRules||{}).providerModelRules)||[];
 for(let r2 of rules){
 let pid2=String(r2.providerId||"");if(!pid2)continue;
 let c=r2.config||{},acc=c.access||{},api=c.api||{};
-let ids=[].concat(c.personalModelIds||[],pm[pid2]||[]),models={};
-for(let id of ids){let s2=String(id||"").trim();if(s2&&!models[s2])models[s2]={name:s2}}
-pcCands.push({pid:pid2,p:{name:r2.providerName,kind:zkind(api.type),models:models,
-systemDisabledReason:(c.systemDisabledReason||r2.systemDisabledReason||null),
-options:{baseURL:String(api.baseUrl||""),apiKey:String(acc.apiKey||"")}},name:String(r2.providerName||"")})}
+let tid=String(r2.templateId||"");
+let tcfg=tpls[tid]||{},tapi=tcfg.api||{};
+// ⓑ 用户模型规则：既说明「模型存在」，也给出「是否被关掉」
+let uIds=[],uOn={};
+for(let r2b of pmRules){
+if(String(r2b.providerId||"")!==pid2)continue;
+let mid=String(r2b.modelId||"").trim();if(!mid)continue;
+uIds.push(mid);
+let cf2=r2b.config||{};
+if(typeof cf2.enabled==="boolean")uOn[mid]=cf2.enabled}
+// ⓒ 模板自带模型 + 默认开关
+let tids=Array.isArray(tcfg.builtinModelIds)?tcfg.builtinModelIds:[];
+let defs=tplDefs[tid]||{};
+function modelOn(mid){
+if(typeof uOn[mid]==="boolean")return uOn[mid];
+if(typeof defs[mid]==="boolean")return defs[mid];
+return!0}
+// 模型全集 = 用户添加的 ∪ 有用户规则的 ∪ 模板自带的；关掉的剔除
+let ids=[].concat(c.personalModelIds||[],uIds,tids),seenMid={},models={};
+for(let id of ids){
+let s2=String(id||"").trim();
+if(!s2||seenMid[s2])continue;
+seenMid[s2]=1;
+if(!modelOn(s2))continue;
+models[s2]={name:s2}}
+// ⓐ 供应商级开关；api.baseUrl/type 缺省时回退到模板（opencode responses 就是这样）
+pcCands.push({pid:pid2,p:{name:r2.providerName,
+kind:zkind(api.type||tapi.type),models:models,
+systemDisabledReason:(c.systemDisabledReason||r2.systemDisabledReason||(r2.enabled===!1?"provider_disabled":null)),
+options:{baseURL:String(api.baseUrl||tapi.baseUrl||""),apiKey:String(acc.apiKey||"")}},name:String(r2.providerName||"")})}
 srcTried.push("provider_config.json:"+pcCands.length)}}catch(_){srcTried.push("provider_config.json:err")}
 // ② config.json 的 provider（旧格式）→ 归一化成同一形状；已被 ① 覆盖的 providerId 跳过
 let cfgCands=[];
@@ -1272,19 +1342,17 @@ let pid2=ent[0],pp=ent[1];
 if(!pp||typeof pp!="object")continue;
 cfgCands.push({pid:pid2,p:pp,name:String(pp.name||"")})}
 srcTried.push("config.json:"+cfgCands.length)}catch(_){srcTried.push("config.json:err")}
-// 合并：① 优先，缺失的用 ②（config.json 的 options.baseURL/apiKey 是显式的，作为回退）。
-// 同 pid 时做模型级合并：config.json 独有的模型并入权威条目（实测 chat 类供应商
-// personalModelIds 可能滞后于 config 侧 models），同名不覆盖、显示名以权威源为准。
+// 合并：① 优先；**同 pid 不再用 ② 补模型**（0.6.27 起）。
+// 权威源的模型全集已经由 personalModelIds ∪ 用户模型规则 ∪ 模板自带模型构成，
+// 与设置页完全同源；config.json 是旧格式残留（实测 chat 侧多出 11 个设置页里根本
+// 不存在的模型，正是「关了还在列表里」的来源）。只有权威源完全没有该 pid 时才用 ②。
 let seen={};
 for(let c of pcCands)seen[c.pid]=1;
 let all=pcCands.slice();
 for(let c of cfgCands){
-if(seen[c.pid]){
-let host=null;for(let h of all){if(h.pid===c.pid){host=h;break}}
-let hm=(host&&host.p&&(host.p.models||(host.p.models={})))||null;
-let cm=(c.p||{}).models||{};
-if(hm)for(let mid of Object.keys(cm)){if(!hm[mid])hm[mid]={name:String((cm[mid]||{}).name||mid)}}
-continue}
+if(seen[c.pid])continue;
+// 旧格式独立供应商也有开关：enabled===false 等价于整组关闭
+if(c.p&&c.p.enabled===!1&&!c.p.systemDisabledReason)c.p.systemDisabledReason="provider_disabled";
 all.push(c);seen[c.pid]=1}
 let byId={};for(let c of all)byId[c.pid]=c;
 // ============================================================

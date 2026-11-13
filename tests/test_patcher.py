@@ -678,6 +678,29 @@ class TestGeneratedJs(unittest.TestCase):
         self.assertRegex(code, r"\.sort\(function\(a,b\)\{",
                          "兜底候选需要排序，用户自定义供应商优先")
 
+    def test_enhance_respects_three_layer_enabled_state(self):
+        """★ 回归（0.6.27）：菜单必须与设置页开关逐项一致。
+
+        现场三类不一致，根因都是「只看了模型集合，没看开关」：
+          ① 整组关闭的供应商仍在菜单（providerRules.enabled=false 被忽略）；
+          ② personalModelIds 为空的供应商整组消失（模型只在 builtin 模板里，小米就是这样）；
+          ③ 被用户关掉的模型仍全部列出（providerModelRules.config.enabled=false 被忽略）。
+        修复=三层开关：供应商 enabled → 用户模型规则 → 模板默认。
+        """
+        code = zp._enhance_main_block("j").decode()
+        self.assertIn("zcode-builtin.json", code,
+                      "必须读内置模板（模型清单与默认开关的唯一来源）")
+        self.assertIn("templateModelRules", code, "必须读模板默认开关")
+        self.assertIn("builtinModelIds", code, "必须读模板自带模型（小米模型只在这里）")
+        self.assertIn("provider_disabled", code,
+                      "providerRules.enabled=false 必须等价于整组关闭")
+        self.assertIn("r2.enabled===!1", code, "必须显式判断供应商级开关")
+        self.assertIn("function modelOn(", code, "必须有模型级开关判定（用户规则优先于模板）")
+        self.assertIn("uOn[mid]", code, "用户模型规则的 enabled 必须参与判定")
+        # 旧格式不再给权威源补模型（否则又会冒出设置页里不存在的模型）
+        self.assertIn("if(seen[c.pid])continue;", code,
+                      "权威源已覆盖的 pid 不应再由 config.json 补模型")
+
     def test_enhance_handler_classifies_errors_and_retries_only_retryable(self):
         """错误必须分类：model/auth/quota 不重试，超时/限流/5xx 才退避重试。"""
         code = zp._enhance_main_block("j").decode()
@@ -1277,6 +1300,58 @@ class TestTpsSnapshotBlock(unittest.TestCase):
         # 缺失/损坏必须返回可识别的失败码，渲染层据此降级为纯事件流
         self.assertIn("no-snapshot", code)
         self.assertIn("success:!1", code)
+
+    def test_handler_does_not_use_ipc_arguments(self):
+        """回归：handler 第二参数是**渲染层实参**，不是 path 模块。
+
+        0.6.26 写成 `async(ev,t)=>{...t.join(...)}`，而 preload 调用时不传参 →
+        `t === undefined` → 每次 invoke 都抛 TypeError → 永远返回 read-failed，
+        渲染层的快照回填（输入/命中/今日）整条链路静默失效。
+        """
+        code = zp._tps_snapshot_main_block("j").decode()
+        self.assertNotIn("t.join(", code,
+                         "handler 不得拿 ipc 实参当 path 模块用（会永远是 undefined）")
+        self.assertIn('r.join(base,".zcode","v2")', code,
+                      "快照路径必须用 import 进来的 path 模块（r.join）")
+        self.assertIn('r.join(root,"ztps-snapshot.json")', code)
+
+    def test_handler_reads_real_snapshot_successfully(self):
+        """真跑注入的 handler 源码，验证它能读出快照并返回 success。
+
+        跳过条件：没有 node / 本机还没生成过快照（CI 环境）。
+        """
+        import json as _json
+        import shutil
+        import subprocess
+        import tempfile
+        snap = Path.home() / ".zcode" / "v2" / "ztps-snapshot.json"
+        node = shutil.which("node")
+        if not node or not snap.is_file():
+            self.skipTest("no node or no snapshot file")
+        code = zp._tps_snapshot_main_block("j").decode()
+        harness = (
+            "const j={handle:(ch,fn)=>{global.__h=fn}};\n"
+            + code
+            + "\n(async()=>{const r=await global.__h({}, undefined);"
+              "process.stdout.write(JSON.stringify({ok:!!(r&&r.success),"
+              "code:r&&r.code,sessions:r&&r.sessions?Object.keys(r.sessions).length:0,"
+              "today:r&&r.today?r.today.total:null}))})();\n"
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                         encoding="utf-8") as f:
+            f.write(harness)
+            path = f.name
+        try:
+            r = subprocess.run([node, path], capture_output=True, timeout=30)
+            out = (r.stdout or b"").decode("utf-8", "replace").strip()
+            self.assertEqual(r.returncode, 0,
+                             f"handler 真跑失败：{(r.stderr or b'')[:400]}")
+            got = _json.loads(out)
+            self.assertTrue(got["ok"], f"快照读取应成功，实得 {got}")
+            self.assertGreater(got["sessions"], 0, "快照里应该至少有一个会话")
+            self.assertGreater(got["today"], 0, "今日总耗应该有值")
+        finally:
+            Path(path).unlink(missing_ok=True)
 
     def test_main_injection_is_valid_js(self):
         import shutil
@@ -3083,6 +3158,20 @@ class TestPluginHookSpec(unittest.TestCase):
         """
         for m in self._spec()["hooks"]["SessionStart"]:
             self.assertNotIn("matcher", m)
+
+    def test_stop_hook_refreshes_usage_snapshot(self):
+        """每轮结束刷新用量快照：DB 结算值只有轮次落库后才完整。
+
+        只靠 SessionStart 会把「今日总耗」冻在会话开始那一刻（用户实测：数值不再变化）。
+        Stop 钩子跑 tps_snapshot.py --quiet —— 静默是硬要求，stdout 非 JSON 会被判钩子失败。
+        """
+        stops = self._spec()["hooks"].get("Stop")
+        self.assertTrue(stops, "缺 Stop 钩子，今日总耗只会在会话开始刷新一次")
+        cmds = [h["command"] for m in stops for h in m["hooks"]]
+        self.assertTrue(any("tps_snapshot.py" in c for c in cmds),
+                        f"Stop 钩子没有调用快照脚本：{cmds}")
+        for c in cmds:
+            self.assertIn("--quiet", c, "钩子调用必须 --quiet，否则 stdout 会污染钩子协议")
 
     def test_every_hook_uses_declared_fields_only(self):
         seen = []

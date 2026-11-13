@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -91,11 +92,63 @@ def zkind(t: str) -> str:
     return "openai-compatible"
 
 
+def read_builtin_templates(root: Path) -> tuple[dict, dict]:
+    """读客户端内置模板（只读）：返回 (模板配置, 每模型默认开关)。
+
+    模板在 `<root>/runtime/provider/<platform>/<version>/endpoint-*/zcode-builtin.json`，
+    多版本并存时取版本号最大的那份。自定义供应商的 personalModelIds 可能为空
+    （小米 MiMo 就是这样），模型清单只在模板的 builtinModelIds 里；模板
+    templateModelRules 同时给出用户没动过的模型的默认开关（= 设置页的灰/绿）。
+    """
+    best = None
+    best_ver: tuple[int, ...] | None = None
+    base = root / "runtime" / "provider"
+    try:
+        for f in base.rglob("zcode-builtin.json"):
+            parts = f.parts
+            ver = None
+            for seg in reversed(parts):
+                m = re.match(r"^(\d+)\.(\d+)(?:\.(\d+))?", seg)
+                if m:
+                    ver = tuple(int(x or 0) for x in m.groups())
+                    break
+            if ver is not None and (best_ver is None or ver > best_ver):
+                best_ver, best = ver, f
+    except Exception:
+        return {}, {}
+    if best is None:
+        return {}, {}
+    raw = _read_json(best)
+    if not isinstance(raw, dict):
+        return {}, {}
+    cfg = raw.get("config") if isinstance(raw.get("config"), dict) else raw
+    tpls: dict[str, dict] = {}
+    defs: dict[str, dict[str, bool]] = {}
+    for t in ((cfg.get("providerConfigRules") or {}).get("templateRules")) or []:
+        tid = str(t.get("templateId") or "")
+        if tid:
+            tpls[tid] = t.get("config") or {}
+    for t in ((cfg.get("modelConfigRules") or {}).get("templateModelRules")) or []:
+        tid = str(t.get("templateId") or "")
+        mid = str(t.get("modelId") or "")
+        if tid and mid:
+            defs.setdefault(tid, {})[mid] = ((t.get("config") or {}).get("enabled") is not False)
+    return tpls, defs
+
+
 def build_candidates(root: Path) -> tuple[list[dict], dict, list[str], dict]:
-    """复刻 handler 的候选表构建：provider_config.json 优先，config.json 补缺。"""
+    """复刻 handler 的候选表构建（0.6.27 起含三层启用状态）。
+
+    模型全集 = personalModelIds ∪ 用户模型规则 ∪ 模板自带模型；
+    是否进表 = 用户规则 enabled ?? 模板默认 ?? 开启；
+    供应商 enabled === false → 整组关闭（等价 systemDisabledReason）。
+    """
     by_id: dict[str, dict] = {}
     notes: list[str] = []
     stats: dict = {}
+
+    tpls, tpl_defs = read_builtin_templates(root)
+    stats["builtin_templates"] = len(tpls)
 
     pcp = root / "provider_config.json"
     pccands: list[dict] = []
@@ -104,11 +157,7 @@ def build_candidates(root: Path) -> tuple[list[dict], dict, list[str], dict]:
         pc = raw.get("config") if isinstance(raw, dict) and "config" in raw else raw
         if isinstance(pc, dict):
             rules = ((pc.get("providerConfigRules") or {}).get("providerRules")) or []
-            pm: dict[str, list[str]] = {}
-            for r in ((pc.get("modelConfigRules") or {}).get("providerModelRules")) or []:
-                pid = str(r.get("providerId") or "")
-                if pid:
-                    pm.setdefault(pid, []).append(str(r.get("modelId") or ""))
+            mrules = ((pc.get("modelConfigRules") or {}).get("providerModelRules")) or []
             for r in rules:
                 pid = str(r.get("providerId") or "")
                 if not pid:
@@ -116,20 +165,51 @@ def build_candidates(root: Path) -> tuple[list[dict], dict, list[str], dict]:
                 c = r.get("config") or {}
                 acc = c.get("access") or {}
                 api = c.get("api") or {}
-                models = {}
-                for i in list(c.get("personalModelIds") or []) + pm.get(pid, []):
+                tid = str(r.get("templateId") or "")
+                tcfg = tpls.get(tid) or {}
+                tapi = tcfg.get("api") or {}
+                defs = tpl_defs.get(tid) or {}
+                u_ids: list[str] = []
+                u_on: dict[str, bool] = {}
+                for m in mrules:
+                    if str(m.get("providerId") or "") != pid:
+                        continue
+                    mid = str(m.get("modelId") or "").strip()
+                    if not mid:
+                        continue
+                    u_ids.append(mid)
+                    en = (m.get("config") or {}).get("enabled")
+                    if isinstance(en, bool):
+                        u_on[mid] = en
+
+                def _on(mid: str) -> bool:
+                    if mid in u_on:
+                        return u_on[mid]
+                    if mid in defs:
+                        return defs[mid]
+                    return True
+
+                ids = (list(c.get("personalModelIds") or []) + u_ids
+                       + list(tcfg.get("builtinModelIds") or []))
+                seen: set[str] = set()
+                models: list[str] = []
+                for i in ids:
                     s = str(i or "").strip()
-                    if s and s not in models:
-                        models[s] = {"name": s}
+                    if not s or s in seen:
+                        continue
+                    seen.add(s)
+                    if _on(s):
+                        models.append(s)
                 pccands.append({
                     "pid": pid,
                     "name": str(r.get("providerName") or ""),
-                    "kind": zkind(api.get("type")),
-                    "baseURL": str(api.get("baseUrl") or ""),
+                    "kind": zkind(api.get("type") or tapi.get("type")),
+                    "baseURL": str(api.get("baseUrl") or tapi.get("baseUrl") or ""),
                     "apiKey": str(acc.get("apiKey") or ""),
-                    "models": list(models),
+                    "models": models,
                     "systemDisabledReason": (c.get("systemDisabledReason")
-                                             or r.get("systemDisabledReason")),
+                                             or r.get("systemDisabledReason")
+                                             or ("provider_disabled" if r.get("enabled") is False else None)),
                     "source": "provider_config.json",
                 })
         stats["provider_config.json"] = len(pccands)
@@ -152,7 +232,8 @@ def build_candidates(root: Path) -> tuple[list[dict], dict, list[str], dict]:
                 "baseURL": str(o.get("baseURL") or ""),
                 "apiKey": str(o.get("apiKey") or ""),
                 "models": list((pp.get("models") or {}).keys()),
-                "systemDisabledReason": pp.get("systemDisabledReason"),
+                "systemDisabledReason": (pp.get("systemDisabledReason")
+                                         or ("provider_disabled" if pp.get("enabled") is False else None)),
                 "source": "config.json",
             })
         stats["config.json"] = len(cfgcands)
@@ -164,6 +245,7 @@ def build_candidates(root: Path) -> tuple[list[dict], dict, list[str], dict]:
     merged = list(pccands)
     for c in cfgcands:
         if c["pid"] in by_id:
+            # 权威源已给出与设置页同源的完整模型集合，旧格式不再补模型（0.6.27）
             continue
         merged.append(c)
         by_id[c["pid"]] = c

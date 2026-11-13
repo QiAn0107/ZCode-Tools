@@ -111,5 +111,31 @@ class TestBuildSnapshot(TpsSnapshotTestBase):
         self.assertIn("stamp", snap)
 
 
+class TestQuietHookMode(unittest.TestCase):
+    """`--quiet` 是 Stop 钩子的调用形态：stdout 必须干净、失败也不得非零退出。
+
+    内核把非 JSON stdout 判为钩子失败、非零退出码记为 error；每轮都刷一条错误日志
+    比不刷新更糟，所以失败必须静默吞掉。
+    """
+
+    def test_quiet_writes_nothing_and_exits_zero_on_missing_db(self):
+        import io
+        from contextlib import redirect_stdout, redirect_stderr
+        buf, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(err):
+            rc = ts.main(["--db", "/nonexistent/definitely-missing.sqlite", "--quiet"])
+        self.assertEqual(rc, 0, "钩子模式失败必须退 0，否则每轮刷错误日志")
+        self.assertEqual(buf.getvalue(), "", f"--quiet 不得写 stdout：{buf.getvalue()!r}")
+
+    def test_non_quiet_still_reports_failure(self):
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = ts.main(["--db", "/nonexistent/definitely-missing.sqlite"])
+        self.assertEqual(rc, 1, "非钩子模式要保留非零退出码，便于人工排查")
+        self.assertIn("读不到用量库", buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

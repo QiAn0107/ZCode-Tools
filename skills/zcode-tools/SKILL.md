@@ -485,7 +485,7 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 
 统计条右键弹出自绘菜单，可在「输入框下方（默认）/ 输入框工具栏 / 会话顶部 sticky」间切换，`localStorage`（键 `ztps-pos`）记忆，重开保持：
 
-- **输入框下方**：composer 卡片之后的独立行（`insertAdjacentElement` 于卡片后），`alignSelf: stretch` 与输入框同宽；**自适应 gap 补偿**（0.6.25）：host 作为新 flex 项会把父容器一份纵向 gap 变成两份，挂载时读父容器 `rowGap` 并以等量负 `marginBottom` 抵消下半份，gap 变化时自动刷新（`host._gapv` 缓存比对）。
+- **输入框下方**：composer 卡片之后的独立行（`insertAdjacentElement` 于卡片后），`alignSelf: stretch` 与输入框同宽；**实测像素间距对齐**（0.6.27）：不再猜父容器 `gap`（Tailwind `space-y-*`／margin 布局读不到，0.6.25 的 `rowGap` 方案会静默失效），挂载后量「胶囊上沿↔卡片下沿」「胶囊下沿↔下一元素」，用 `marginTop/marginBottom` **增量**抵到 `GAP_TARGET=2px`（绝对值反算会在 0 与 -gap 间自激振荡），偏差 <0.5px 即停写；快路径 1s 节流重量，布局/窗口/主题变化自动跟随。
 - **输入框工具栏**：行内水平居中。
 - **会话顶部**：吸附到消息区滚动容器（从 `section[data-turn-id]` 向上找第一个 `overflow-y: auto/scroll` 且高 >120px 的祖先）第一个子元素，`position: sticky; top: 8px` 悬浮；host 上 `pointer-events: none` 放行下方消息。
 - 数据层零改动，仅挂载点不同；挂载点找不到（空态/设置页）时自清理，`window.__ztpsDiag.posMode`/`hiddenReason` 可诊断。右键修复注记：菜单用 pointerdown 捕获关外部点击时必须放行菜单内部按下，否则 click 在已移除节点上落空、选项永远点不中。
@@ -504,8 +504,9 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 
 **结算层**（0.6.26，精确值 + 全历史，秒级延迟）：
 
-6. Python 侧 `tps_snapshot.py` 只读 `~/.zcode/cli/db/db.sqlite`（`mode=ro`），按 `session_id` 聚合 `model_usage`（`status='completed'`）+ 今日全局，写 `~/.zcode/v2/ztps-snapshot.json`；触发点为 SessionStart worker 与看护写补丁前（无新增常驻）。口径移植自 `xhwxt/zcode-token-usage-statusbar` (MIT)：合计=`computed_total`（=input+output，cache 已含 input 不重复加），命中=`cache_read/input`。
-7. 渲染层经 `zcode:tps-snapshot` IPC（preload 桥 + main 只读 handler，与 enhance bridge 同锚点模式）取快照，5s TTL 缓存；以 `Math.max(事件累计, 快照值)` 回填会话输入/输出/命中与今日总耗——事件优先、快照补漏，流式值不会被拉低。快照缺失/损坏/无桥时静默降级为纯事件流（`__ztpsDiag.snapshotHit/snapshotTs/snapshotAge` 可查）。
+6. Python 侧 `tps_snapshot.py` 只读 `~/.zcode/cli/db/db.sqlite`（`mode=ro`），按 `session_id` 聚合 `model_usage`（`status='completed'`）+ 今日全局，写 `~/.zcode/v2/ztps-snapshot.json`；触发点：SessionStart worker、**每轮结束的 `Stop` 钩子**（0.6.27，DB 只有轮末落库，只靠 SessionStart 会把今日总耗冻在会话开始那一刻）、看护写补丁前。无新增常驻进程。口径移植自 `xhwxt/zcode-token-usage-statusbar` (MIT)：合计=`computed_total`（=input+output，cache 已含 input 不重复加），命中=`cache_read/input`。钩子调用必须带 `--quiet`，否则 stdout 非 JSON 会被判钩子失败。
+7. 渲染层经 `zcode:tps-snapshot` IPC（preload 桥 + main 只读 handler，与 enhance bridge 同锚点模式）取快照，3s TTL 缓存，**轮次结束强制失效**（`_snapCache.at = 0`）即时取本轮结算值；以 `Math.max(事件累计, 快照值)` 回填会话输入/输出/命中与今日总耗——事件优先、快照补漏，流式值不会被拉低。快照缺失/损坏/无桥时静默降级为纯事件流（`__ztpsDiag.snapshotHit/snapshotOk/snapshotErr/snapshotTs/snapshotToday/snapshotAge` 可查）。
+8. **handler 参数陷阱**（0.6.27 修复）：`ipcMain.handle(ch, (event, ...args))` 的第二参数是**渲染层实参**，不是模块。0.6.26 写成 `async(ev,t)=>{...t.join(...)}` 而 preload 不传参 → `t===undefined` → 每次 invoke 抛 TypeError → 永远 `read-failed`，快照整条链路静默失效（表现为输入/命中不显示、今日总耗只吃 localStorage 存量）。路径模块必须用 `import` 进来的 `r`。
 
 ### 注入原理（asar 重打包级）
 
@@ -526,7 +527,8 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 | 重启后无胶囊 | `--tps-footer --check` 看 state；渲染进程 console 查 `window.__ztps` 是否存在 |
 | console 出现 CSP 拦截报错 | 当前版本 index.html 无 CSP；若未来版本加了，需同步放宽 `script-src` 允许同目录脚本 |
 | 指标一直只有「●」/「● 总耗」 | usage.delta 未关联到轮（看 `window.__ztpsTurns` 里轮的 outputTokens/inputTokens/lastUsageAt 是否为空）；版本升级导致帧结构变化时，用 `window.__ztpsPort` 旁路监听原始帧比对字段 |
-| 输入/平均命中不出现但输出正常 | 先看 `__ztpsDiag.pendingUsageSize/appliedFromPending`：前者涨后者 0 = 桥接断裂，delta 全在暂存；再看 `snapshotHit`：false = 快照桥缺失（`python tps_snapshot.py --check` 查库，`--tps-footer --check` 看 4 组件是否齐） |
+| 输入/平均命中不出现但输出正常 | 先看 `__ztpsDiag.snapshotErr`：`read-failed` = main handler 读到快照但抛错（0.6.26 的 `t.join` 参数误用就是这类，0.6.27 已修）；`no-snapshot` = 快照文件没生成（跑 `python tps_snapshot.py --check` 查库，`--tps-footer --check` 看 4 组件）；undefined + `snapshotOk:false` = IPC 桥缺失。再看 `pendingUsageSize/appliedFromPending`：前者涨后者 0 = 事件桥接断裂 |
+| 今日总耗不变化 | ①`snapshotErr` 有值 = 快照链路断（见上一行）；②`snapshotOk:true` 但 `snapshotTs` 不变 = 快照文件没刷新，检查 `Stop` 钩子是否在跑（`hooks/hooks.json`）、手动 `python tps_snapshot.py` 后数值应变；③只有 localStorage 在涨=事件流 usage.delta 没到 |
 | 旧会话无累计 | 快照未命中：`snapshotAge` 过大或 -1 = IPC 桥缺失/快照过期；手动跑 `python tps_snapshot.py` 刷新后重开会话 |
 | tok/s 不出现 | 该轮从未有过文本流（纯工具调用轮）时无速度可算，属预期；有文本流后静默期（工具执行）保持最近值 |
 | 想换脚本逻辑 | 改 zcode-tps.js 后重跑 `--tps-footer`（内容变了会自动热更新脚本条目，无需 revert） |
@@ -666,11 +668,25 @@ ref 档必然查不到 → 掉进兜底档 → 打到别的供应商 → `HTTP 4
 baseURL + 有 apiKey + 无 `systemDisabledReason`）→ 点选某项即生效。
 菜单顶部有「跟随界面选择（默认）」用于清除选择（等价于删掉配置里的 `providerId`/`modelId`）。
 
-**清单口径（0.6.25）**：候选表以 `provider_config.json` 为权威，同 pid 时 `config.json`
-独有的模型会**模型级合并**进来（不再整条丢弃）；跨供应商重名模型标注供应商后缀
-（如 `glm-5.3-flash（火山方舟 Agent Plan）`）；usable 但无模型的供应商**整组隐藏**；
-无 baseURL 的供应商（如 Responses 协议内置端点型）不列出 —— handler 自拼 URL 发请求，
-列出来点了也只会 `no-baseurl`，不如不显示。
+**清单口径（0.6.27）**：菜单必须与设置页的**开关状态逐项一致**。客户端把启用状态拆成三层，
+缺任何一层都会出现「设置里关了、菜单里还在」或「设置里开着、菜单里没有」：
+
+| 层 | 位置 | 语义 |
+|---|---|---|
+| ⓐ 供应商 | `providerRules[].enabled === false` | **整组关闭**（火山方舟 Agent Plan 实测）。等价于 `systemDisabledReason="provider_disabled"`，`usable()` 直接排除 |
+| ⓑ 模型·用户 | `modelConfigRules.providerModelRules[].config.enabled` | 单模型用户开关。`false` 不得进菜单 |
+| ⓒ 模型·模板 | `runtime/provider/<平台>/<版本>/endpoint-*/zcode-builtin.json` 的 `templateRules[].builtinModelIds` + `templateModelRules[].config.enabled` | 模板自带模型与**默认**开关。自定义供应商 `personalModelIds` 为空时（小米 MiMo Token Plan 实测）模型**只在这里**，不读模板就整组消失；用户没动过的模型以模板默认值为准（= 设置页的灰/绿） |
+
+生效顺序：**ⓑ 用户规则 > ⓒ 模板默认 > 视作开启**（自定义供应商自己加的模型）。
+模型全集 = `personalModelIds ∪ 用户模型规则 ∪ 模板 builtinModelIds`；`api.baseUrl` / `api.type`
+在 rule 里缺失时**回退模板**（`opencode-go-responses` 就是这样，不再需要「借道 Chat 组」的旧绕法）。
+
+**旧格式不再补模型**：`config.json` 同 pid 的 `models` **不再**并入候选表（0.6.25 曾模型级合并）。
+实测 chat 侧 config.json 有 30 个模型、设置页只列 19 个（模板内置），把旧的并进来正是
+「关了还在列表里」的来源。`config.json` 只用于权威源完全没有该 pid 的兜底。
+
+跨供应商重名模型仍标注供应商后缀（如 `glm-5.3-flash（火山方舟 Agent Plan）`）；
+usable 但无模型的供应商**整组隐藏**。
 
 **为什么"选了就生效"**：一次选择同时走两条路，互为兜底 ——
 
