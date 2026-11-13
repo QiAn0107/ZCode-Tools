@@ -700,7 +700,7 @@
   let diag = null;
   try {
     diag = window.__ztpsDiag = window.__ztpsDiag || {};
-    diag.scriptVersion = "3.18-live";
+    diag.scriptVersion = "3.19-sid";
     diag.loadedAt = new Date().toISOString();
   } catch (err) { /* ignore */ }
 
@@ -837,6 +837,29 @@
           if (innerSess) domSess = innerSess.getAttribute("data-session-id");
         }
       }
+      // 3.17.x 把 data-session-id 挂在 composer 卡片上（无会话时为 "draft"），不在 frame 上；
+      // 取不到就不能按会话查快照 → 输入/命中永远回填不了。兜底顺序：
+      // ① 事件流里轮次自带的 sessionId（usage.delta/stream.chunk 均下发真实 sess_xxx）
+      // ② 主会话 DOM 里任一非 draft 的 data-session-id（排除侧边栏）
+      if (!domSess || domSess === "draft") {
+        domSess = null;
+        let bestAt = -1;
+        for (const t of turns.values()) {
+          if (!t.sessionId) continue;
+          const at = t.lastUsageAt ?? t.startedAt ?? 0;   // 取最近有活动的那个会话，别被旧轮覆盖
+          if (at >= bestAt) { bestAt = at; domSess = t.sessionId; }
+        }
+        if (!domSess) {
+          let pool = [];
+          try {
+            pool = Array.from(document.querySelectorAll("[data-session-id]")).filter((el) => {
+              const v = el.getAttribute("data-session-id");
+              return v && v !== "draft" && !isInsideSidePane(el);
+            });
+          } catch (err) { pool = []; }
+          if (pool.length) domSess = pool[0].getAttribute("data-session-id");
+        }
+      }
 
       const visible = new Set();
       // 只有在内存中有轮次数据时才扫描可见 DOM；若 turns 为空（新启动/仅看历史），直接跳过数百个节点的 DOM 遍历
@@ -909,8 +932,11 @@
         diag.hostAttached = !!host;
       }
       // 数据态:轮次有时间戳或生成活动;空态:当前会话无任何轮次(新会话/未对话)。
-      // 状态栏常驻:空态显示仅绿点的胶囊(空闲静态),不拿当前时间冒充轮次时间
-      const hasData = !!latest && (hasActivity(latest) || latest.endedAt != null || latest.startedAt != null);
+      // 快照有量也算数据态——重开旧会话时事件流没有历史，但 DB 结算值在；
+      // 否则只显示「● 总耗」，输入/输出/命中要等新一轮才出现。
+      const snapHas = !!(snap && ((snap.input || 0) > 0 || (snap.output || 0) > 0));
+      const hasData = (!!latest && (hasActivity(latest) || latest.endedAt != null || latest.startedAt != null))
+        || snapHas;
       if (diag) diag.hiddenReason = hasData ? null : "空态(无轮次数据)";
       if (!host) {
         host = document.createElement("div");
@@ -967,7 +993,8 @@
         }
         return;
       }
-      const s = statsOf(latest);
+      // 只有快照、没有事件流轮次（重开旧会话）时给一份空指标，只渲染累计区
+      const s = latest ? statsOf(latest) : { stamp: null, ttft: null, tps: null, out: 0, reasoning: 0, streaming: false };
       // 内容签名:未变化时完全跳过 DOM 写入与排版回流，达到零开销
       const key = [s.stamp, s.ttft, s.tps, s.out, s.reasoning, s.streaming,
                    agg.rounds, agg.input, agg.cache, agg.cacheWrite, agg.reasoning, agg.output,

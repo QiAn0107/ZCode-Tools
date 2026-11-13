@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.27-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.28-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -151,6 +151,11 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.28（会话 id 兜底：让快照回填真正落到当前会话）
+- **会话 id 取不到 = 输入/命中永远不显示**：3.17.x 把 `data-session-id` 挂在 composer 卡片上（无会话时是 `"draft"`），不在 `[data-workspace-conversation-frame]` 上；原逻辑只查 frame → `domSess=null` → 按会话查快照直接跳过。兜底顺序：① 事件流轮次自带的 `sessionId`（取最近有活动的一轮）② 主会话 DOM 里任一非 `draft` 的 `data-session-id`（排除侧边栏）；
+- **重开旧会话也有累计**：数据态判定新增「快照有量」，此前只看事件流轮次，打开旧会话时只有「● 总耗」；同时 `statsOf` 允许无轮次（只渲染累计区），不会因 `latest=null` 崩；
+- **测试**：冒烟新增 `draft` 判据、轮次 sessionId 兜底、DOM 兜底排除侧边栏、`snapHas`/`statsOf(null)` 断言，全量 312 项通过。
 
 #### 0.6.27（修复输入/命中不显示、今日总耗不变化、状态栏下方间距、增强菜单与实际模型列表不符）
 - **增强菜单与设置页开关逐项一致**：补上客户端的三层启用状态 —— ①`providerRules[].enabled=false` 整组关闭（火山方舟 Agent Plan 关了仍显示）；②`providerModelRules[].config.enabled=false` 单模型关闭（关掉的模型仍在列表）；③内置模板 `zcode-builtin.json` 的 `builtinModelIds` + `templateModelRules` 默认开关（小米 MiMo Token Plan 的 `personalModelIds` 为空，模型只在模板里 → 整组消失）。生效顺序：用户规则 > 模板默认 > 开启；`baseUrl`/`type` 缺失时回退模板（Responses 组不再需要借道 Chat）；旧格式 `config.json` 不再给权威源补模型（chat 侧多出的 11 个设置页不存在的模型即「关了还在」的来源）；

@@ -172,7 +172,7 @@ check(/Math\.abs\(topErr\) > 0\.5/.test(src) && /botErr > 0\.5/.test(src),
 check(/now - host\._fitAt > 1000/.test(src),
       "缺重量节流，布局/窗口变化后补偿不会刷新");
 check(!/parentRowGap/.test(src), "旧的 parentRowGap 猜测式补偿应已移除");
-check(/scriptVersion = "3\.18-live"/.test(src), "脚本版本号未同步到 3.18-live");
+check(/scriptVersion = "3\.19-sid"/.test(src), "脚本版本号未同步到 3.19-sid");
 
 // ---------- ⑤ 早到 delta pending 回放 ----------
 // 首批带 input 的 delta 常早于 turnHeader/respTurn 桥接到达：必须暂存待回放，
@@ -197,6 +197,20 @@ check(/snapshotErr/.test(src), "diag 缺 snapshotErr，快照失败原因无法�
 // 轮次结束=DB 落库完成，必须立刻让缓存过期，否则结算值要等 3s TTL 才可见
 check(/if \(!t\.streaming\) _snapCache\.at = 0/.test(src),
       "轮次结束没有失效快照缓存，本轮结算值要等 TTL 才显示");
+
+// ---------- ⑦ 会话 id 兜底（快照按会话回填的前提） ----------
+// 3.17.x 的 data-session-id 挂在 composer 卡片上（无会话时是 "draft"），frame 上取不到；
+// 取不到就等于快照查找键为 null → 输入/命中永远回填不了。必须有事件流 sessionId 兜底。
+check(/domSess === "draft"/.test(src), '缺 "draft" 判据：新会话的占位 id 会被当成真实会话');
+check(/const at = t\.lastUsageAt \?\? t\.startedAt \?\? 0/.test(src),
+      "缺轮次 sessionId 兜底（取最近活动轮），快照查找键可能为 null");
+check(/v !== "draft" && !isInsideSidePane\(el\)/.test(src),
+      "DOM 兜底必须排除 draft 与侧边栏，否则会拿错会话");
+// 重开旧会话：事件流没有历史，只有快照；数据态必须认快照，且 statsOf 要能接受 null
+check(/const snapHas = !!\(snap &&/.test(src),
+      "数据态没认快照：重开旧会话只显示绿点，输入/输出/命中不出现");
+check(/const s = latest \? statsOf\(latest\)/.test(src),
+      "无轮次但快照有量时会崩：statsOf(null)");
 
 // ---------- 汇报 ----------
 if (failures.length) {

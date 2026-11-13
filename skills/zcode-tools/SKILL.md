@@ -529,7 +529,7 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 | 指标一直只有「●」/「● 总耗」 | usage.delta 未关联到轮（看 `window.__ztpsTurns` 里轮的 outputTokens/inputTokens/lastUsageAt 是否为空）；版本升级导致帧结构变化时，用 `window.__ztpsPort` 旁路监听原始帧比对字段 |
 | 输入/平均命中不出现但输出正常 | 先看 `__ztpsDiag.snapshotErr`：`read-failed` = main handler 读到快照但抛错（0.6.26 的 `t.join` 参数误用就是这类，0.6.27 已修）；`no-snapshot` = 快照文件没生成（跑 `python tps_snapshot.py --check` 查库，`--tps-footer --check` 看 4 组件）；undefined + `snapshotOk:false` = IPC 桥缺失。再看 `pendingUsageSize/appliedFromPending`：前者涨后者 0 = 事件桥接断裂 |
 | 今日总耗不变化 | ①`snapshotErr` 有值 = 快照链路断（见上一行）；②`snapshotOk:true` 但 `snapshotTs` 不变 = 快照文件没刷新，检查 `Stop` 钩子是否在跑（`hooks/hooks.json`）、手动 `python tps_snapshot.py` 后数值应变；③只有 localStorage 在涨=事件流 usage.delta 没到 |
-| 旧会话无累计 | 快照未命中：`snapshotAge` 过大或 -1 = IPC 桥缺失/快照过期；手动跑 `python tps_snapshot.py` 刷新后重开会话 |
+| 旧会话无累计 | 快照未命中：先看 `__ztpsDiag.domSessionId`——为 null/`draft` 说明会话 id 没取到（0.6.28 已加事件流 sessionId 兜底）；再看 `snapshotAge` 过大或 -1 = IPC 桥缺失/快照过期，手动跑 `python tps_snapshot.py` 刷新后重开会话 |
 | tok/s 不出现 | 该轮从未有过文本流（纯工具调用轮）时无速度可算，属预期；有文本流后静默期（工具执行）保持最近值 |
 | 想换脚本逻辑 | 改 zcode-tps.js 后重跑 `--tps-footer`（内容变了会自动热更新脚本条目，无需 revert） |
 
