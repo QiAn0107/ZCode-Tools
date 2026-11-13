@@ -179,7 +179,7 @@ check(/const room = bBottom - h\.bottom - GAP_TARGET/.test(src),
 check(/now - host\._fitAt > 1000/.test(src),
       "缺重量节流，布局/窗口变化后补偿不会刷新");
 check(!/parentRowGap/.test(src), "旧的 parentRowGap 猜测式补偿应已移除");
-check(/scriptVersion = "3\.21-dsbar"/.test(src), "脚本版本号未同步到 3.21-dsbar");
+check(/scriptVersion = "3\.20-sink"/.test(src), "脚本版本号未同步到 3.20-sink");
 
 // ---------- ⑤ 早到 delta pending 回放 ----------
 // 首批带 input 的 delta 常早于 turnHeader/respTurn 桥接到达：必须暂存待回放，
@@ -218,26 +218,6 @@ check(/const snapHas = !!\(snap &&/.test(src),
       "数据态没认快照：重开旧会话只显示绿点，输入/输出/命中不出现");
 check(/const s = latest \? statsOf\(latest\)/.test(src),
       "无轮次但快照有量时会崩：statsOf(null)");
-
-// ---------- ⑧ DeepSeek 风展示层 ----------
-// 无胶囊底、12px 统一灰、线性图标、组间极淡 ·、无竖线、无常驻绿点。
-check(/background: "transparent", padding: "0"/.test(src),
-      "胶囊仍有底色/内边距，不是 DeepSeek 的透明单行");
-check(/fontSize: "12px", height: "16px", lineHeight: "16px"/.test(src),
-      "字号/行高不是 12px/16px");
-check(/const ICONS = \{/.test(src) && /createElementNS\(ns, "svg"\)/.test(src),
-      "缺内联 SVG 线性图标");
-for (const k of ["timer", "bolt", "stack", "gauge"]) {
-  check(src.indexOf(k + ': [') >= 0, "缺图标 " + k);
-}
-check(!/span\(cross \? "│" : "·"\)/.test(src), "仍在使用竖线分组，DeepSeek 只有 ·");
-check(/className = "ztps-sep"/.test(src), "分隔符没有 ztps-sep 类（透明度 .32）");
-check(/className = "ztps-live"/.test(src), "生成中呼吸点缺失");
-check(/if \(s\.streaming\) \{/.test(src), "呼吸点必须只在 streaming 时出现");
-check(!/const dot = span\("●"\)/.test(src), "常驻绿点应已移除");
-check(/const availW = host\.clientWidth/.test(src) && /Math\.abs\(availW - pill\._zw\) > 8/.test(src),
-      "缺宽度变化重建（必须量宿主可用宽度，量胶囊自身会自激），窄化的段放大后回不来");
-check(/缓存命中 /.test(src), "命中率文案未改为「缓存命中」");
 
 // ---------- 汇报 ----------
 if (failures.length) {

@@ -108,8 +108,8 @@ if (typeof fmtPct === "function") {
 }
 
 // ---------- ② 渲染路径：必须经 fmtPct，且不得再拼裸 pct ----------
-check(/缓存命中[^"]*"\s*\+\s*fmtPct\(/.test(src),
-      "状态栏「缓存命中」段没有走 fmtPct（退回整数显示了？）");
+check(/平均命中[^"]*"\s*\+\s*fmtPct\(/.test(src),
+      "状态栏「平均命中」段没有走 fmtPct（退回整数显示了？）");
 check(!/"\s*\+\s*pct\s*\+\s*"%"/.test(src),
       "源码里仍有 `\" + pct + \"%\"`：绕过了 fmtPct，会渲染成整数百分比");
 check(!/Math\.round\(\s*\(?\s*agg\.cache\s*\/\s*agg\.input\s*\)?\s*\*\s*100/.test(src),
@@ -121,8 +121,8 @@ check(!/Math\.round\(\s*\(?\s*agg\.cache\s*\/\s*agg\.input\s*\)?\s*\*\s*100/.tes
 // (快照到达重绘);溢出先丢总耗段(p7)。
 check(/agg\.rounds,\s*agg\.input,\s*agg\.cache.*agg\.output,[\s\S]*?today\.key,\s*today\.total,\s*_snapCache\.stamp\]\.join/.test(src),
       "状态栏内容签名缺今日/快照字段，今日变化或快照到达时不会重绘");
-check(/for \(const drop of \[1, 2, 7\]\)/.test(src),
-      "渐进降级顺序不对:应先丢首 token(1)/tok/s(2)，保留会话累计与总耗");
+check(/for \(const drop of \[7, 1, 2\]\)/.test(src),
+      "渐进降级顺序不对:应先丢总耗(7),再丢首 token(1)/tok/s(2),会话累计保留");
 
 // ---------- 汇报 ----------
 if (failures.length) {

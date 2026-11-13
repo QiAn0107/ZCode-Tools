@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.30-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.31-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -9,7 +9,7 @@
 </p>
 
 为 ZCode 桌面客户端补齐极致原生体验与生产力增强：
-- 📊 **实时 TPS 与性能状态栏**：对齐 DeepSeek harness 的透明单行样式（线性图标 + 极淡圆点分隔），展示首 Token、tok/s、会话输入/输出/缓存命中与今日总耗。
+- 📊 **实时 TPS 与性能状态栏**：首 Token 延迟、tok/s 生成速度、会话输入/输出与平均命中率、今日总耗常驻展示。
 - ✨ **提示词智能增强**：输入框旁一键重写润色草稿；**右键自由选择**润色所用模型，支持一键恢复。
 - 📈 **用量图表全量展开**：破除官方 Top 5/6 截断限制，全量展示所有模型的调用趋势与占比。
 - ⚡ **设置页模型自动拉取**：设置页一键获取供应商可用模型，批量同步写入配置。
@@ -44,7 +44,7 @@
 | 特性 | 功能名称 | 核心效果 | 改动范围 |
 |:---:|:---|:---|:---|
 | 🛡️ | **升级自动自愈** | 动态监控客户端与插件版本，升级后自动感知并调度看护静默修复 | 状态监控器 |
-| 📊 | **实时 TPS 状态栏** | 输入框下方透明单行（DeepSeek 风）：即时指标（首 token / tok/s）+ 会话累计（输入 / 输出 / 缓存命中）+ 今日总耗，右键自由切换位置 | `app.asar` 注入脚本 |
+| 📊 | **实时 TPS 状态栏** | 输入框常驻：即时指标（首 token / tok/s）+ 会话累计（输入 / 输出 / 平均命中）+ 今日总耗，右键自由切换位置 | `app.asar` 注入脚本 |
 | ✨ | **提示词增强润色** | 输入框旁「增强提示词」按钮，右键支持按供应商自选润色模型，持久化且免重启 | `app.asar` 注入脚本 + IPC |
 | 📈 | **用量图表去截断** | 「设置 → 用量」趋势图与饼图不再被 Top 5 / Top 6 截断，全量展示所有模型 | `app.asar` 渲染层 |
 | ⚡ | **设置页模型拉取** | 设置页新增「⚡ 自动拉取模型」按钮，自动从供应商同步可用模型并批量写入 | `app.asar` 注入脚本 + IPC |
@@ -152,15 +152,11 @@ run.cmd                        # Windows
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
 
-#### 0.6.30（状态栏视觉重构：对齐 DeepSeek harness 底部状态条）
-- **容器**：去掉浅灰圆角胶囊与内边距，改为透明单行（`background:transparent; padding:0`）；`11px/20px` → `12px/16px`，贴近窗口底边；
-- **图标**：新增 4 个内联 SVG 线性图标（`timer` 计时器 / `bolt` 闪电 / `stack` 层叠 / `gauge` 仪表），`viewBox 16`、`stroke:currentColor`、1.4 描边、12px 显示，随主题自动变色；
-- **颜色**：统一 `var(--color-foreground-subtle)` 灰（兜底 `#8a8a8a`，深色 `#9a9a9a`），数值不再高亮白、tok/s 与命中不再用橙色强调；
-- **分隔**：组间统一极淡 `·`（opacity .32），去掉跨组竖线 `│`；
-- **指示点**：去掉常驻绿点，仅流式生成时在行首显示 5px 呼吸点（`ztps-live`，1.2s 明暗循环）；
-- **文案**：`平均命中` → `缓存命中`（口径不变：累计 cache_read ÷ 累计 input）；末位槽位放今日总耗；
-- **宽度自适应**：溢出降级改为「首 token → tok/s → 总耗」，并新增窗口变宽 >8px 时的重建（判据取宿主可用宽度，避免降级后误判自激）；被丢的段放大后自动恢复；
-- **测试**：`tps_daily_smoke` 新增透明底/字号/图标/分隔/呼吸点/宽度重建/文案断言，`tps_pct_smoke` 与 `test_patcher` 文案同步，全量 312 项通过。
+#### 0.6.31（回滚 0.6.30 的状态栏外观改动，恢复 0.6.29 样式）
+- 0.6.30 的 DeepSeek 风重构（透明单行 / 线性图标 / 统一灰 / 无胶囊底）整体撤回，状态栏恢复为 0.6.25~0.6.29 的浅灰胶囊 + 绿点 + `·`/`│` 分组样式；
+- 版本号前进而非回退：插件市场只认新版本，退版本号会导致「更新」不可用，故以 0.6.31 承载 0.6.29 的展示层；
+- **保留** 0.6.27~0.6.29 的功能修复（快照 IPC 参数、会话 id 兜底、Stop 钩子按轮刷新、间距实测补偿），这些是数据正确性与间距 bug，不属于本次外观回滚范围；
+- 测试与文档随回滚一并恢复，全量 312 项通过。
 
 #### 0.6.29（状态栏与底部边框的距离）
 - **末位元素负 margin 收不掉下方留白**：胶囊是父容器最后一个子元素时，`marginBottom` 负值只会压缩容器总高（父高 auto 时容器底同步上移，偏差恒定），**胶囊自己不会下移**，那段 `padding-bottom` 怎么调都还在。改为按「父容器边框盒底 − 胶囊下沿 − 2px」算下沉量，用 `translateY` 做视觉位移沉进 padding，上限 `MAX_SINK=16px`，不越过父容器、不压其它 UI；
