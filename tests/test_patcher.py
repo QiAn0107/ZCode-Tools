@@ -514,6 +514,55 @@ class TestPullerInjectionState(unittest.TestCase):
         self.assertEqual(zp._models_preload_state(blob)[:2], (False, False))
 
 
+class TestPullerTriggerStyle(unittest.TestCase):
+    """拉取按钮改纯图标（下载）并挂「添加模型」左侧的回归钉。
+
+    0.6.36 及之前是带文字的胶囊按钮（「⚡ 自动拉取模型」），after() 挂在添加模型
+    右侧，比原生按钮还抢眼。0.6.37 起：28px 图标按钮 + before() 挂左侧 + loading
+    只转圈不换字。本测试防止 after() / 文字 span / 胶囊样式被「顺手」加回来。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = (Path(__file__).resolve().parent.parent
+                   / "skills" / "zcode-tools" / "scripts" / "zcode-model-puller.js"
+                   ).read_text(encoding="utf-8")
+
+        def block(name):
+            i = cls.src.index(f"const {name}")
+            return cls.src[i:cls.src.index("`;", i)]
+
+        cls.idle_html = block("PULL_BTN_IDLE_HTML")
+        cls.loading_html = block("PULL_BTN_LOADING_HTML")
+
+    def test_mounts_left_of_add_model_button(self):
+        self.assertIn("addModelBtn.before(pullBtn);", self.src)
+        self.assertNotIn("addModelBtn.after(pullBtn);", self.src,
+                         "拉取按钮必须挂在「添加模型」左侧，不得回到右侧")
+        # 位置再校准：React 重排挤偏后必须由 350ms 自愈循环插回原位
+        self.assertIn("addModelBtn.previousElementSibling !== pullBtn", self.src)
+
+    def test_trigger_is_icon_only(self):
+        self.assertIn("pullBtn.innerHTML = PULL_BTN_IDLE_HTML;", self.src)
+        self.assertIn("pullBtn.innerHTML = PULL_BTN_LOADING_HTML;", self.src)
+        self.assertIn("zcode-pull-dl-icon", self.idle_html, "idle 必须用下载图标")
+        for gone in ("<span>", "自动拉取模型", "正在拉取模型"):
+            self.assertNotIn(gone, self.idle_html, f"触发按钮标记不得再有文字：{gone}")
+
+    def test_loading_is_spinner_only(self):
+        self.assertIn("zcode-spin-icon", self.loading_html)
+        self.assertNotIn("<span>", self.loading_html, "loading 态同样纯图标，尺寸不抖")
+        self.assertIn('pullBtn.setAttribute("title", PULL_BTN_TITLE_BUSY);', self.src)
+        # 图标按钮没了文字，含义全靠 tooltip/aria-label
+        self.assertIn('pullBtn.setAttribute("aria-label", "自动拉取模型");', self.src)
+
+    def test_compact_square_css(self):
+        self.assertIn("width: 28px;", self.src)
+        self.assertIn("height: 28px;", self.src)
+        for gone in ("padding: 0 14px;", "margin-left: 8px;", "margin-top: 4px;"):
+            self.assertNotIn(gone, self.src, f"胶囊按钮残留样式：{gone}")
+
+
 class TestGeneratedJs(unittest.TestCase):
     """注入到 main/preload 的 JS 是拼接出来的——必须保证拼出来仍是合法 JS。"""
 

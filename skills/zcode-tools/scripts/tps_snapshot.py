@@ -48,10 +48,29 @@ select count(*), coalesce(sum(input_tokens),0), coalesce(sum(output_tokens),0),
        (select m2.input_tokens from model_usage m2
          where m2.session_id = m.session_id and m2.status = 'completed'
          order by m2.completed_at desc, m2.id desc limit 1),
-       count(distinct turn_id), coalesce(sum(retry_count),0),
+       {turns_expr}, coalesce(sum(retry_count),0),
        coalesce(max(completed_at),0)
 from model_usage m where m.session_id = ? and m.status = 'completed'
 """
+
+# 轮数口径：只数「真实用户轮」。上下文压缩会把一个可见轮拆成两个 turn_id——续接段
+# 是新 turn_id 且整段 query_source='compact'、parent 为 NULL，用户在转录里根本看
+# 不到新轮块（事件层按 DOM 可见 section 计数也不会数它），但 distinct turn_id 会
+# 把它 +1（用户实测：可见 8 轮显示 9轮）。所以轮数只认含 main_turn 行的 turn_id；
+# session_title/git_commit_message/subagent 等隐藏请求若独立成 turn 同样不算轮。
+# steps 不受影响：compact 续接的请求是真实计费请求，照常计入。
+TURNS_EXPR_QSRC = ("count(distinct case when coalesce(m.query_source,'main_turn')='main_turn' "
+                   "then m.turn_id end)")
+# 老库（无 query_source 列）：全部按真实轮计（与 0.6.36 及之前行为一致）。
+TURNS_EXPR_PLAIN = "count(distinct turn_id)"
+
+
+def _has_query_source(con: sqlite3.Connection) -> bool:
+    try:
+        cols = [r[1] for r in con.execute("PRAGMA table_info(model_usage)")]
+        return "query_source" in cols
+    except sqlite3.Error:
+        return False
 
 RANGE_SQL = """
 select count(*), coalesce(sum(input_tokens),0), coalesce(sum(output_tokens),0),
@@ -101,8 +120,11 @@ def connect_ro(db: Path) -> sqlite3.Connection:
         return con
 
 
-def session_usage(con: sqlite3.Connection, sid: str) -> dict:
-    row = con.execute(SESSION_SQL, (sid,)).fetchone()
+def session_usage(con: sqlite3.Connection, sid: str, has_qsrc: bool | None = None) -> dict:
+    if has_qsrc is None:
+        has_qsrc = _has_query_source(con)
+    expr = TURNS_EXPR_QSRC if has_qsrc else TURNS_EXPR_PLAIN
+    row = con.execute(SESSION_SQL.format(turns_expr=expr), (sid,)).fetchone()
     (n, i, o, r, cr, cw, tot, tools, ctx, turns, retries, last) = row
     return {"requests": n, "input": i, "output": o, "reasoning": r,
             "cache_read": cr, "cache_write": cw, "total": tot,
@@ -129,9 +151,10 @@ def build_snapshot(con: sqlite3.Connection, sids: list[str] | None = None) -> di
     if sids is None:
         sids = [r[0] for r in con.execute(
             "select distinct session_id from model_usage where status='completed'")]
+    has_qsrc = _has_query_source(con)  # PRAGMA 只探一次，不逐会话重复
     sessions = {}
     for sid in sids:
-        u = session_usage(con, sid)
+        u = session_usage(con, sid, has_qsrc)
         if u["requests"] > 0:
             sessions[sid] = u
     s, e = today_range_ms()

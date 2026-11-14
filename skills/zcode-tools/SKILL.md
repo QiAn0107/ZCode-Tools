@@ -388,7 +388,7 @@ python zcode_patcher.py --enhance-prompt --check
 空会话:  ● 总耗 58.1k（今日无消耗时仅显示 ●）
 ```
 
-- **轮/步口径**：轮=本会话已完成轮数（快照 `count(distinct turn_id)`）；步=已完成模型请求数（快照 `count(*)`，一次模型请求=一步，一轮含工具调用会有多步）。事件流按 `usage.delta.requestId` 去重实时累加；与快照合并取 `max(事件流累计, 快照结算值)`——**不得再 +「流式中轮次」补偿**（0.6.35 起 PostToolUse 让快照在回合内也刷新，in-flight 轮落库即进快照，+stream 会双重计数；且终态 turnHeader 行偶发缺失时旧轮卡在 streaming，+stream 会把它当新轮 +1——用户实测空闲 5 轮显示 6轮、2 轮 ~115 请求显示 3轮 215步，0.6.36 修复）。新轮由事件流立即 +1、快照 ≤30s 追平，重开旧会话、轮次滚出视口都不丢历史；步数为 0 时该段不显示，避免「1轮0步」。
+- **轮/步口径**：轮=本会话真实用户轮数（快照只数含 `query_source='main_turn'` 行的 `turn_id`，0.6.37——上下文压缩会把一个可见轮拆成两个 turn_id，续接段整段 `query_source='compact'`、parent 为 NULL、转录里**没有新轮块**，`distinct turn_id` 会虚 +1，用户实测可见 8 轮显示 9轮；老库无该列退回旧口径）；步=已完成模型请求数（快照 `count(*)`，一次模型请求=一步，一轮含工具调用会有多步，compact 续接请求照常计入）。事件流按 `usage.delta.requestId` 去重实时累加，且轮数**按 DOM 可见 section 计数**（`visible.has(t.msgId)`，天然等于用户看到的轮块数）；与快照合并取 `max(事件流累计, 快照结算值)`——**不得再 +「流式中轮次」补偿**（0.6.35 起 PostToolUse 让快照在回合内也刷新，in-flight 轮落库即进快照，+stream 会双重计数；且终态 turnHeader 行偶发缺失时旧轮卡在 streaming，+stream 会把它当新轮 +1——用户实测空闲 5 轮显示 6轮、2 轮 ~115 请求显示 3轮 215步，0.6.36 修复）。新轮由事件流立即 +1、快照 ≤30s 追平，重开旧会话、轮次滚出视口都不丢历史；步数为 0 时该段不显示，避免「1轮0步」。
 - **会话累计口径**：输入/输出=各轮 `usage.delta` 累加（API 计费视角，每轮 inputTokens 含历史所以累计值偏大，属预期）；平均命中=累计缓存命中 ÷ 累计输入（`input>0` 即显示，`0.00%` 也显示），**固定两位小数四舍五入**（`fmtPct`，不足补零，如 `84.00%`）；流式中未报 usage 的轮以内容估算兜底。
 - **今日总耗口径**：今日 Σ(inputTokens + outputTokens)，只计 `usage.delta` 精确值（不含流式估算），按 `occurredAt` 本地日期分桶；全局口径，含所有会话与侧边栏辅助对话。仅补丁运行期间捕获（ZCode 未运行时/历史消耗不计）；数据存 `localStorage`（键 `ztps-daily-v1`），保留近 30 天，重复事件幂等去重，多窗口经 `storage` 事件同步，清 localStorage 即清零。
 - **渐进降级顺序**：溢出时先丢总耗 → 首 token → tok/s → 轮步，输入/输出/命中保留。
@@ -436,7 +436,7 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 
 **结算层**（0.6.26，精确值 + 全历史，秒级延迟）：
 
-6. Python 侧 `tps_snapshot.py` 只读 `~/.zcode/cli/db/db.sqlite`（`mode=ro`），按 `session_id` 聚合 `model_usage`（`status='completed'`）+ 今日全局，写 `~/.zcode/v2/ztps-snapshot.json`；每会话同时带 `turns`（`count(distinct turn_id)`）与 `requests`（completed 行数=模型请求数），供状态栏 `N轮N步` 使用。触发点：SessionStart worker、**每轮结束的 `Stop` 钩子**（0.6.27，DB 只有轮末落库，只靠 SessionStart 会把今日总耗冻在会话开始那一刻）、**回合内每次工具调用的 `PostToolUse` 钩子**（0.6.35，带 `--min-age 30` 节流：快照 30s 内刷新过就秒退不碰 DB。修的是「长回合中途总耗冻在回合初值」——用户实测官方用量页 15.9M、状态栏 9m，轮末快照一写才跳到 20m）、看护写补丁前。无新增常驻进程。口径移植自 `xhwxt/zcode-token-usage-statusbar` (MIT)：合计=`computed_total`（=input+output，cache 已含 input 不重复加），命中=`cache_read/input`。钩子调用必须带 `--quiet`，否则 stdout 非 JSON 会被判钩子失败。
+6. Python 侧 `tps_snapshot.py` 只读 `~/.zcode/cli/db/db.sqlite`（`mode=ro`），按 `session_id` 聚合 `model_usage`（`status='completed'`）+ 今日全局，写 `~/.zcode/v2/ztps-snapshot.json`；每会话同时带 `turns`（只数含 `main_turn` 行的 turn_id，0.6.37 起，见轮/步口径）与 `requests`（completed 行数=模型请求数），供状态栏 `N轮N步` 使用。触发点：SessionStart worker、**每轮结束的 `Stop` 钩子**（0.6.27，DB 只有轮末落库，只靠 SessionStart 会把今日总耗冻在会话开始那一刻）、**回合内每次工具调用的 `PostToolUse` 钩子**（0.6.35，带 `--min-age 30` 节流：快照 30s 内刷新过就秒退不碰 DB。修的是「长回合中途总耗冻在回合初值」——用户实测官方用量页 15.9M、状态栏 9m，轮末快照一写才跳到 20m）、看护写补丁前。无新增常驻进程。口径移植自 `xhwxt/zcode-token-usage-statusbar` (MIT)：合计=`computed_total`（=input+output，cache 已含 input 不重复加），命中=`cache_read/input`。钩子调用必须带 `--quiet`，否则 stdout 非 JSON 会被判钩子失败。
 7. 渲染层经 `zcode:tps-snapshot` IPC（preload 桥 + main 只读 handler，与 enhance bridge 同锚点模式）取快照，3s TTL 缓存，**轮次结束强制失效**（`_snapCache.at = 0`）即时取本轮结算值；以 `Math.max(事件累计, 快照值)` 回填会话输入/输出/命中、轮数/步数（0.6.36 起纯 `max`，快照 `turns/requests` 不再加流式中轮次补差——见轮/步口径）与今日总耗——事件优先、快照补漏，流式值不会被拉低。快照缺失/损坏/无桥时静默降级为纯事件流（`__ztpsDiag.snapshotHit/snapshotOk/snapshotErr/snapshotTs/snapshotToday/snapshotAge/aggRounds/aggSteps/snapTurns/snapRequests` 可查）。
 8. **handler 参数陷阱**（0.6.27 修复）：`ipcMain.handle(ch, (event, ...args))` 的第二参数是**渲染层实参**，不是模块。0.6.26 写成 `async(ev,t)=>{...t.join(...)}` 而 preload 不传参 → `t===undefined` → 每次 invoke 抛 TypeError → 永远 `read-failed`，快照整条链路静默失效（表现为输入/命中不显示、今日总耗只吃 localStorage 存量）。路径模块必须用 `import` 进来的 `r`。
 
@@ -467,7 +467,7 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 
 ## 二、模型拉取按钮：设置页一键拉取/勾选模型
 
-设置 → 模型供应商页注入「⚡️ 自动拉取模型」按钮：点开弹窗自动拉取该供应商 `/models` 接口的模型列表，标注「已添加/新模型」并勾选，保存后经**原生 IPC** 读写 `~/.zcode/v2/config.json` 并自动刷新界面——不用退出 ZCode、不用手改 config。
+设置 → 模型供应商页在「添加模型」左侧注入下载图标按钮（悬停提示功能，点击转圈）：点开弹窗自动拉取该供应商 `/models` 接口的模型列表，标注「已添加/新模型」并勾选，保存后经**原生 IPC** 读写 `~/.zcode/v2/config.json` 并自动刷新界面——不用退出 ZCode、不用手改 config。
 
 ```bash
 python zcode_patcher.py --model-puller             # 注入（默认用本 skill scripts/zcode-model-puller.js）

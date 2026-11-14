@@ -87,19 +87,15 @@
       --zpull-trigger-hover-shadow: 0 4px 16px rgba(59, 130, 246, 0.3);
     }
 
-    /* 现代高级感触发按钮样式 */
+    /* 触发按钮：28px 方形纯图标（下载），挂在「添加模型」左侧，间距交给父容器 gap */
     #zcode-auto-pull-models-btn {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      gap: 6px;
-      margin-left: 8px;
-      margin-top: 4px;
-      height: 36px;
-      padding: 0 14px;
+      width: 28px;
+      height: 28px;
+      padding: 0;
       border-radius: 8px;
-      font-size: 13px;
-      font-weight: 500;
       background: var(--zpull-trigger-bg);
       color: var(--zpull-trigger-fg);
       border: 1px solid var(--zpull-trigger-border);
@@ -127,7 +123,18 @@
       fill: currentColor;
       transition: transform 0.2s;
     }
-    #zcode-auto-pull-models-btn:hover .zcode-pull-bolt-icon {
+    /* 触发按钮的下载图标（描边风格）；闪电图标仅剩弹窗标题在用 */
+    .zcode-pull-dl-icon {
+      width: 16px;
+      height: 16px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      transition: transform 0.2s;
+    }
+    #zcode-auto-pull-models-btn:hover .zcode-pull-dl-icon {
       transform: scale(1.15);
     }
 
@@ -136,6 +143,8 @@
       to { transform: rotate(360deg); }
     }
     .zcode-spin-icon {
+      width: 16px;
+      height: 16px;
       animation: zcodeSpin 1s linear infinite;
     }
 
@@ -382,6 +391,24 @@
     }
   `;
   document.head.appendChild(style);
+
+  // 触发按钮标记与提示：28px 图标按钮只有图标没有文字，两种状态同尺寸不抖；
+  // 含义靠 title/aria-label 补充（idle = 下载图标，loading = 转圈）。
+  const PULL_BTN_TITLE_IDLE = "根据当前 Base URL 和 API Key 自动拉取所有可用模型";
+  const PULL_BTN_TITLE_BUSY = "正在拉取模型...";
+  const PULL_BTN_IDLE_HTML = `
+    <svg class="zcode-pull-dl-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+      <polyline points="7 10 12 15 17 10"></polyline>
+      <line x1="12" y1="15" x2="12" y2="3"></line>
+    </svg>
+  `;
+  const PULL_BTN_LOADING_HTML = `
+    <svg class="zcode-spin-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+      <circle cx="12" cy="12" r="10" stroke-opacity="0.25"></circle>
+      <path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"></path>
+    </svg>
+  `;
 
   function showToast(message, duration = 3000) {
     const existing = document.querySelector(".zcode-custom-toast");
@@ -990,6 +1017,10 @@
     }
 
     if (pullBtn && pullBtn.isConnected) {
+      // React 重排可能把按钮挤离原位：不在「添加模型」左侧就插回去
+      if (addModelBtn.previousElementSibling !== pullBtn) {
+        addModelBtn.before(pullBtn);
+      }
       return;
     }
 
@@ -1001,14 +1032,10 @@
     pullBtn = document.createElement("button");
     pullBtn.id = "zcode-auto-pull-models-btn";
     pullBtn.type = "button";
-    pullBtn.setAttribute("title", "根据当前 Base URL 和 API Key 自动拉取所有可用模型");
+    pullBtn.setAttribute("title", PULL_BTN_TITLE_IDLE);
+    pullBtn.setAttribute("aria-label", "自动拉取模型");
 
-    pullBtn.innerHTML = `
-      <svg class="zcode-pull-bolt-icon" viewBox="0 0 24 24">
-        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
-      </svg>
-      <span>自动拉取模型</span>
-    `;
+    pullBtn.innerHTML = PULL_BTN_IDLE_HTML;
 
     pullBtn.onclick = async (e) => {
       e.preventDefault();
@@ -1023,13 +1050,8 @@
       }
 
       pullBtn.classList.add("loading");
-      pullBtn.innerHTML = `
-        <svg class="zcode-spin-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 14px; height: 14px;">
-          <circle cx="12" cy="12" r="10" stroke-opacity="0.25"></circle>
-          <path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"></path>
-        </svg>
-        <span>正在拉取模型...</span>
-      `;
+      pullBtn.setAttribute("title", PULL_BTN_TITLE_BUSY);
+      pullBtn.innerHTML = PULL_BTN_LOADING_HTML;
 
       try {
         let result = null;
@@ -1077,16 +1099,13 @@
         showToast(`❌ 请求异常: ${err.message}`);
       } finally {
         pullBtn.classList.remove("loading");
-        pullBtn.innerHTML = `
-          <svg class="zcode-pull-bolt-icon" viewBox="0 0 24 24">
-            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
-          </svg>
-          <span>自动拉取模型</span>
-        `;
+        pullBtn.setAttribute("title", PULL_BTN_TITLE_IDLE);
+        pullBtn.innerHTML = PULL_BTN_IDLE_HTML;
       }
     };
 
-    addModelBtn.after(pullBtn);
+    // 挂在「添加模型」左侧（0.6.37 前 after() 挂右侧，胶囊带文字，太抢眼）
+    addModelBtn.before(pullBtn);
   }
 
   // 监听点击与按键事件，零延迟自愈

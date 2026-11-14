@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.36-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.37-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -45,7 +45,7 @@
 | 🛡️ | **升级自动自愈** | 动态监控客户端与插件版本，升级后自动感知并调度看护静默修复 | 状态监控器 |
 | 📊 | **实时 TPS 状态栏** | 输入框常驻：即时指标（首 token / tok/s）+ 会话累计（N轮N步 / 输入 / 输出 / 平均命中）+ 今日总耗，右键自由切换位置 | `app.asar` 注入脚本 |
 | ✨ | **提示词增强润色** | 输入框旁「增强提示词」按钮，右键支持按供应商自选润色模型，持久化且免重启 | `app.asar` 注入脚本 + IPC |
-| ⚡ | **设置页模型拉取** | 设置页新增「⚡ 自动拉取模型」按钮，自动从供应商同步可用模型并批量写入 | `app.asar` 注入脚本 + IPC |
+| ⚡ | **设置页模型拉取** | 设置页「添加模型」左侧的下载图标按钮，点开弹窗自动同步供应商可用模型并批量写入 | `app.asar` 注入脚本 + IPC |
 
 ---
 
@@ -149,6 +149,13 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.37（修压缩续接轮虚增轮数：可见 8 轮显示 9轮；拉取按钮改下载图标并移至「添加模型」左侧）
+- **轮数虚增根因**：上下文压缩会把一个可见轮拆成两个 turn_id——压缩时上下文耗尽，续接段是新 turn_id 且整段 `query_source='compact'`、parent 为 NULL，转录里**没有新轮块**（用户看不见），但快照按 `count(distinct turn_id)` 计轮把它 +1——用户实测可见 8 轮显示 9轮。事件层按 DOM 可见 section 计数本来就是对的，幽灵轮全来自快照层；
+- **修复**：快照 `turns` 只数含 `query_source='main_turn'` 行的 turn_id（compact 续接轮、纯 session_title/git_commit_message 隐藏请求轮都不算轮）；steps 口径不变（compact 续接请求是真实计费请求，照常计入）；老库无 `query_source` 列自动退回旧口径；顺带钉死「计划批准不分裂轮」（计划+批准+实施是同一个 turn_id，无需处理）；
+- **测试**：新增 `test_compact_continuation_not_a_round` / `test_null_query_source_rows_still_count` / `test_legacy_db_without_query_source_column`；
+- **模型拉取按钮重做**：「⚡ 自动拉取模型」文字胶囊按钮改为 28px 下载图标按钮，挂在「添加模型」**左侧**（原为右侧），含义靠 tooltip + `aria-label`；loading 态只转圈不换字（图标按钮尺寸不抖）；350ms 自愈循环顺带做位置再校准（React 重排挤偏自动插回原位）；弹窗与拉取/保存逻辑不变；
+- **测试**：新增 `TestPullerTriggerStyle` 4 项源文本回归钉（禁止 after/文字 span/胶囊样式回潮）+ `tests/puller_mount_smoke.js` 最小 DOM 桩真跑脚本（左侧挂载 / 纯图标 / 挤偏自愈 / tooltip+aria）；全量 325 项通过；
 
 #### 0.6.36（修复轮数/步数虚增：空闲 5 轮显示 6轮、回合中 3轮 215步）
 - **根因**：轮/步合并公式是 `max(事件流累计, 快照.turns/requests + streaming 轮轮次/步数)`，依赖「快照只在轮末写入、流式中的轮一定没落库」这一前提，两点都塌了：①终态 `turnHeader` 行偶发缺失时，已结束的轮永远卡在 `streaming:true`，`+streamTurns` 把它当新轮再 +1——重启重放后 usage 不回放、卡住轮的 steps=0，于是空闲时刻 5 轮 149 请求显示 6轮 149步（步数碰巧对、轮数多 1）；运行中旧轮卡住则轮步齐虚（2 轮 ~115 请求显示 3轮 215步）；②0.6.35 的 PostToolUse 让快照在回合内也刷新，in-flight 轮一落库就进快照，`+stream` 变成双重计数（回合越长虚增越多）；

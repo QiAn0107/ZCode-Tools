@@ -18,8 +18,8 @@ ZCode 客户端补丁工具
   原件备份 app.asar.tps.bak（带指纹 meta），记录在 app.asar.tps-patch.json，可整体还原。
 
 二、模型拉取按钮（app.asar，--model-puller）
-  设置页注入「⚡️ 自动拉取模型」按钮：拉取供应商 /models 接口 → 弹窗勾选 → 写入
-  config.json（整读整写、已有条目原样保留）。
+  设置页在「添加模型」左侧注入下载图标按钮：拉取供应商 /models 接口 → 弹窗勾选 →
+  写入 config.json（整读整写、已有条目原样保留）。
   四处改动：out/renderer/ 新增 zcode-model-puller.js + index.html 挂载 +
   preload 暴露 3 个 IPC 方法（readConfigFile/writeConfigFile/fetchModelsFromUrl）+
   main 注册 3 个 IPC handler（读写 ~/.zcode/v2/config.json、代理拉模型列表）。
@@ -2069,7 +2069,7 @@ def _process_ipc_patch(asar: Path, check_only: bool, revert: bool, src_path: Pat
 
 def process_model_puller(asar: Path, check_only: bool, revert: bool, puller_src: Path | None, *,
                          dry_run: bool = False, version: str | None = None) -> bool:
-    """模型拉取按钮（设置页「⚡️ 自动拉取模型」）。"""
+    """模型拉取按钮（设置页「添加模型」左侧的下载图标按钮）。"""
     return _process_ipc_patch(asar, check_only, revert, puller_src, PULLER_SPEC,
                               dry_run=dry_run, version=version)
 
@@ -2262,7 +2262,7 @@ def main() -> int:
     ap.add_argument("--tps-src", default=None,
                     help="指定注入脚本路径（默认本目录 zcode-tps.js）")
     ap.add_argument("--model-puller", action="store_true",
-                    help="注入模型拉取按钮：设置页「自动拉取模型」，经 preload/main IPC 读写 config，asar 重打包级")
+                    help="注入模型拉取按钮：设置页「添加模型」左侧的下载图标按钮，经 preload/main IPC 读写 config，asar 重打包级")
     ap.add_argument("--puller-src", default=None,
                     help="指定注入的 zcode-model-puller.js 路径（默认用本脚本同目录自带的）")
     ap.add_argument("--enhance-prompt", action="store_true",

@@ -33,14 +33,15 @@ class TpsSnapshotTestBase(unittest.TestCase):
             input_tokens integer, output_tokens integer, reasoning_tokens integer,
             cache_read_input_tokens integer, cache_creation_input_tokens integer,
             computed_total_tokens integer, tool_call_count integer, retry_count integer,
-            completed_at integer)""")
+            completed_at integer, query_source text)""")
         self.addCleanup(self.con.close)
 
-    def add(self, turn, status, i, o, r=0, cr=0, cw=0, at=1000, tools=0, retries=0):
+    def add(self, turn, status, i, o, r=0, cr=0, cw=0, at=1000, tools=0, retries=0,
+            qsrc="main_turn"):
         self.con.execute(
-            "insert into model_usage values (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "insert into model_usage values (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (f"id-{turn}-{at}", self.SID, turn, status, i, o, r, cr, cw,
-             i + o, tools, retries, at))
+             i + o, tools, retries, at, qsrc))
         self.con.commit()
 
 
@@ -80,6 +81,47 @@ class TestSessionUsage(TpsSnapshotTestBase):
         u = ts.session_usage(self.con, self.SID)
         self.assertEqual(u["requests"], 3)
         self.assertEqual(u["turns"], 2)
+
+    def test_compact_continuation_not_a_round(self):
+        """0.6.37 回归：上下文压缩续接轮不算新轮。
+
+        压缩把一个可见轮拆成两个 turn_id——续接段是新 turn_id 且整段
+        query_source='compact'、parent 为 NULL，转录里没有新轮块（事件层按 DOM
+        可见 section 计数也不会数它），distinct turn_id 却会 +1
+        （用户实测：可见 8 轮，状态栏显示 9轮）。
+        steps 不受影响：续接请求是真实计费请求，照常计入。
+        """
+        self.add("t1", "completed", 10, 1, at=1000)
+        self.add("t2", "completed", 10, 1, at=2000)
+        self.add("t2c", "completed", 10, 1, at=3000, qsrc="compact")
+        self.add("t2c", "completed", 10, 1, at=3100, qsrc="compact")
+        self.add("t3", "completed", 10, 1, at=4000, qsrc="session_title")
+        u = ts.session_usage(self.con, self.SID)
+        self.assertEqual(u["turns"], 2, "compact 续接轮与纯标题请求轮都不算轮")
+        self.assertEqual(u["requests"], 5)
+
+    def test_null_query_source_rows_still_count(self):
+        """query_source 为 NULL 的行按真实轮计（coalesce 兜底，跨客户端版本安全）。"""
+        self.add("t1", "completed", 10, 1, qsrc=None)
+        self.add("t2", "completed", 10, 1, qsrc=None)
+        u = ts.session_usage(self.con, self.SID)
+        self.assertEqual(u["turns"], 2)
+
+    def test_legacy_db_without_query_source_column(self):
+        """无 query_source 列的老库：退回 distinct turn_id 旧口径，不得报错。"""
+        con2 = sqlite3.connect(":memory:")
+        self.addCleanup(con2.close)
+        con2.execute("""create table model_usage(
+            id text, session_id text, turn_id text, status text,
+            input_tokens integer, output_tokens integer, reasoning_tokens integer,
+            cache_read_input_tokens integer, cache_creation_input_tokens integer,
+            computed_total_tokens integer, tool_call_count integer, retry_count integer,
+            completed_at integer)""")
+        con2.execute("insert into model_usage values (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                     ("a", self.SID, "t1", "completed", 10, 1, 0, 0, 0, 11, 0, 0, 1000))
+        con2.commit()
+        u = ts.session_usage(con2, self.SID)
+        self.assertEqual(u["turns"], 1)
 
     def test_empty_session_zero(self):
         u = ts.session_usage(self.con, "sess-nobody")

@@ -1,6 +1,6 @@
 {
   "name": "zcode-tools",
-  "version": "0.6.36",
+  "version": "0.6.37",
   "description": "ZCode 桌面客户端全方位原生体验增强套件：TPS 实时状态栏、提示词多模型智能润色与设置页模型拉取。内置客户端升级自动感知与无感自愈看护，全量幂等、安全可还原，支持按需逐项开关。",
   "author": {
     "name": "QiAn0107"
@@ -17,7 +17,7 @@
     "model_puller": {
       "type": "boolean",
       "title": "设置页模型拉取按钮",
-      "description": "设置页「⚡️ 自动拉取模型」按钮，勾选即写入配置。默认开启；需要改写 app.asar，会在你完全退出 ZCode 时写入，下次启动可见。",
+      "description": "设置页「添加模型」左侧的下载图标按钮，点开弹窗勾选即写入配置。默认开启；需要改写 app.asar，会在你完全退出 ZCode 时写入，下次启动可见。",
       "default": true
     },
     "enhance_prompt": {
