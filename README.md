@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.35-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.36-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -149,6 +149,11 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.36（修复轮数/步数虚增：空闲 5 轮显示 6轮、回合中 3轮 215步）
+- **根因**：轮/步合并公式是 `max(事件流累计, 快照.turns/requests + streaming 轮轮次/步数)`，依赖「快照只在轮末写入、流式中的轮一定没落库」这一前提，两点都塌了：①终态 `turnHeader` 行偶发缺失时，已结束的轮永远卡在 `streaming:true`，`+streamTurns` 把它当新轮再 +1——重启重放后 usage 不回放、卡住轮的 steps=0，于是空闲时刻 5 轮 149 请求显示 6轮 149步（步数碰巧对、轮数多 1）；运行中旧轮卡住则轮步齐虚（2 轮 ~115 请求显示 3轮 215步）；②0.6.35 的 PostToolUse 让快照在回合内也刷新，in-flight 轮一落库就进快照，`+stream` 变成双重计数（回合越长虚增越多）；
+- **修复**：轮/步合并改为纯 `max(事件流实时累计, 快照结算值)`，删除 `+streamTurns/streamSteps` 补偿——新轮由事件流立即 +1，快照 ≤30s 追平；重开旧会话由快照兜底全历史；
+- **测试**：新增 `TestTpsRoundsStepsMerge` 钉死公式（不得再出现 `+ streamTurns/streamSteps`）与根因注释；
 
 #### 0.6.35（修复长回合中途「今日总耗/会话累计」冻结在回合初值，远低于官方用量页）
 - **根因**：状态栏数值 = max(事件流实时捕获, DB 快照)，但快照只在 SessionStart / Stop(轮末) / 看护时刷新；一个回合跑几十分钟、上百步工具调用时，快照一直冻在回合开始值，而官方用量页直接读 DB（每请求落库）实时领先——用户实测官方 15.9M、状态栏 9m，轮末快照一写才跳到 20m；事件流层还收不到其它会话（侧边栏/旧会话）的 usage.delta，同样只能等快照；

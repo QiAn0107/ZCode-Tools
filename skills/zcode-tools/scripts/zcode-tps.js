@@ -897,15 +897,12 @@
       // 会话累计:轮数/步数 / 累计输入 / 累计缓存命中 / 累计思考 / 累计输出(仅当前可见会话的轮次)
       const agg = { rounds: 0, steps: 0, input: 0, cache: 0, cacheWrite: 0, reasoning: 0, output: 0 };
       let latest = null;
-      // 流式中的轮一定还没落库：快照合并时把它补回基线，重开旧会话后首轮也能立即 +1
-      let streamTurns = 0, streamSteps = 0;
       for (const t of turns.values()) {
         if (!visible.has(t.msgId)) continue;
         // 轮次归属会话与当前显示会话不符时排除(会话切换的 DOM 中间态残留兜底)
         if (t.sessionId && domSess && t.sessionId !== domSess) continue;
         if (t.startedAt != null || hasActivity(t)) agg.rounds++;
         agg.steps += t.steps || 0;
-        if (t.streaming) { streamTurns++; streamSteps += t.steps || 0; }
         agg.input += t.inputTokens || 0;
         agg.cache += t.cacheReadTokens || 0;
         agg.cacheWrite += t.cacheWriteTokens || 0;
@@ -924,9 +921,15 @@
         if ((snap.cache_read || 0) > agg.cache) agg.cache = snap.cache_read;
         if ((snap.output || 0) > agg.output) agg.output = snap.output;
         // 轮/步是会话级全历史:快照 turns=distinct turn_id、requests=completed 模型请求数。
-        // 快照只在轮末写入,流式中的轮一定还没进去,故在快照基线上补回它,再与事件流取大。
-        const snapRounds = (snap.turns || 0) + streamTurns;
-        const snapSteps = (snap.requests || 0) + streamSteps;
+        // ⚠️ 不得再把「streaming 轮的轮数/步数」加到快照基线上（0.6.35 及之前这么做）：
+        //   * 0.6.35 起 PostToolUse 钩子让快照在回合内也持续刷新，in-flight 轮的首个请求
+        //     一落库就进 snap.turns/requests，再 +stream 会把它算两遍；
+        //   * 终态 turnHeader 行偶发缺失时，旧轮会永远卡在 streaming——+stream 会把
+        //     它当成新轮再 +1（用户实测：空闲 5 轮显示 6；回合中 2 轮 115 请求显示 3轮 215步）。
+        // 口径 = max(事件流实时累计, 快照结算值)：新轮由事件流立即 +1，快照 ≤30s 追平；
+        // 重开旧会话事件流无历史，由快照兜底全历史。
+        const snapRounds = snap.turns || 0;
+        const snapSteps = snap.requests || 0;
         if (snapRounds > agg.rounds) agg.rounds = snapRounds;
         if (snapSteps > agg.steps) agg.steps = snapSteps;
       }

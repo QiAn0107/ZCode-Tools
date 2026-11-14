@@ -1514,6 +1514,36 @@ class TestEnhancePromptScript(unittest.TestCase):
         self.assertIn("value = lastKnownModel.value", body, "读空时必须回退到粘性记忆")
 
 
+class TestTpsRoundsStepsMerge(unittest.TestCase):
+    """轮/步合并公式：max(事件流实时累计, 快照结算值)，**不得**再加 streaming 轮的补偿。
+
+    旧公式 snapRounds = snap.turns + streamTurns 依赖「快照只在轮末写入、流式中的轮
+    一定还没落库」这一前提，两个前提都塌了：
+      * 0.6.35 起 PostToolUse 钩子让快照在回合内也刷新，in-flight 轮落库即进快照，
+        再 +stream 会双重计数；
+      * 终态 turnHeader 行偶发缺失时旧轮永远卡在 streaming，+stream 把它当新轮 +1
+        （用户实测：空闲 5 轮显示 6轮；2 轮 ~115 请求显示 3轮 215步）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.src = (Path(__file__).resolve().parent.parent
+                   / "skills" / "zcode-tools" / "scripts" / "zcode-tps.js"
+                   ).read_text(encoding="utf-8")
+
+    def test_merge_is_pure_max_no_stream_compensation(self):
+        self.assertIn("const snapRounds = snap.turns || 0;", self.src)
+        self.assertIn("const snapSteps = snap.requests || 0;", self.src)
+        for gone in ("+ streamTurns", "+ streamSteps",
+                     "snap.turns || 0) + stream", "snap.requests || 0) + stream"):
+            self.assertNotIn(gone, self.src, f"轮/步合并不得再补偿 streaming 轮：{gone}")
+
+    def test_root_cause_comment_is_kept(self):
+        """根因注释必须在：防止将来有人「顺手」把 +stream 补偿加回去。"""
+        self.assertIn("不得再把「streaming 轮的轮数/步数」加到快照基线上", self.src)
+        self.assertIn("卡在", self.src)
+
+
 class TestTpsSidePaneIsolation(unittest.TestCase):
     """TPS 状态栏的侧边栏/辅助对话隔离逻辑：状态栏只能挂载在主对话框，绝不能在开启辅助对话时来回跳动。"""
 
