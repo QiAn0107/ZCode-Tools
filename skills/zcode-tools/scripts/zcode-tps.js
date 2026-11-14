@@ -322,6 +322,8 @@
         "@media (prefers-color-scheme: dark){",
         ":root:not(.light):not([data-theme='light']) [data-ztps-menu]",
         "{--ztps-bg:#1e1e1e;--ztps-fg:#e8e8e8}}",
+        "/* 状态点呼吸灯(0.6.49):仅 opacity,合成器动画零重排零重绘 */",
+        "@keyframes ztpsBreath{0%,100%{opacity:.35}50%{opacity:1}}",
         "/* 模型弹窗扁平列表宽度自适应保障 */",
         "[data-radix-popper-content-wrapper] [role='menu'].w-48,",
         "[data-radix-popper-content-wrapper] [role='listbox'].w-48,",
@@ -558,6 +560,21 @@
     if (!Number.isFinite(n)) return "0.00";
     return (Math.round(n * 100 + 1e-9) / 100).toFixed(2);
   };
+  // ---------- 渐变色（0.6.47/0.6.48 用户口径）----------
+  // tok/s:0→红、400→紫,中间线性插值;命中率:0%→橙、100%→绿(命中高=省钱)。
+  // 两端钳制;亮/暗主题下 #ef4444/#a855f7/#f97316/#22c55e 均可读。
+  const mixHex = (a, b, t) => {
+    const k = Math.max(0, Math.min(1, t));
+    const rgb = [0, 1, 2].map((i) => {
+      const pa = parseInt(a.slice(1 + i * 2, 3 + i * 2), 16);
+      const pb = parseInt(b.slice(1 + i * 2, 3 + i * 2), 16);
+      return Math.round(pa + (pb - pa) * k).toString(16).padStart(2, "0");
+    });
+    return "#" + rgb.join("");
+  };
+  const TPS_GRAD_MAX = 400;
+  const colorTps = (v) => mixHex("#ef4444", "#a855f7", (v || 0) / TPS_GRAD_MAX);
+  const colorHit = (pct) => mixHex("#f97316", "#22c55e", (pct || 0) / 100);
   const fmtStamp = (ms) => {
     if (ms == null) return null;
     const d = new Date(ms), now = new Date();
@@ -729,7 +746,7 @@
   let diag = null;
   try {
     diag = window.__ztpsDiag = window.__ztpsDiag || {};
-    diag.scriptVersion = "3.23-settle";
+    diag.scriptVersion = "3.26-dotbreath";
     diag.loadedAt = new Date().toISOString();
   } catch (err) { /* ignore */ }
 
@@ -1079,25 +1096,44 @@
         pill.style.padding = "0 10px";
         pill.style.color = "var(--color-foreground-subtle, var(--ztps-dim, #5b6470))";
         pill.innerHTML = "";
-        const ACCENT = "var(--color-warning, var(--ztps-accent, #b45309))";
         const VALUE = "var(--color-foreground, var(--ztps-fg, #1b1f24))";
         const span = (txt, cls) => {
           const sp = document.createElement("span");
           sp.textContent = txt;
-          if (cls === "ACCENT") sp.style.color = ACCENT;
-          else if (cls === "VALUE") sp.style.color = VALUE;
+          if (cls === "VALUE") sp.style.color = VALUE;
           return sp;
         };
-        // 绿点常驻:生成中发亮,空闲静态
-        const dot = span("●");
-        dot.style.color = "#4ade80";
-        if (s.streaming) dot.style.textShadow = "0 0 6px rgba(74,222,128,.8)";
+        // 状态点常驻（0.6.49 用户口径）：对话运行中=琥珀呼吸灯，空闲=绿色静态。
+        // 点节点跨重建复用（pill._zdot）：流式中 tok/s 每次变化都会重建 pill（innerHTML=""），
+        // 若每次新建节点，CSS 动画会不断从头播，呼吸感失效——只在 streaming 翻转时改状态。
+        let dot = pill._zdot;
+        if (!dot) {
+          dot = span("●");
+          pill._zdot = dot;
+        }
+        if (dot._zbusy !== !!s.streaming) {
+          dot._zbusy = !!s.streaming;
+          if (s.streaming) {
+            dot.style.color = "#f59e0b";
+            dot.style.textShadow = "0 0 6px rgba(245,158,11,.8)";
+            dot.style.animation = "ztpsBreath 1.6s ease-in-out infinite";
+          } else {
+            dot.style.color = "#4ade80";
+            dot.style.textShadow = "";
+            dot.style.animation = "";
+          }
+        }
         pill.appendChild(dot);
         // 段布局:即时指标(g0:首 token/tok/s)+ 会话累计(g1:轮数/步数/输入/输出/平均命中)+ 今日总耗(g2:总耗)。
         // 组间用竖线分隔,组内用 · ;不显示时间(用户不需要)
         segs = [];
         if (s.ttft != null && s.ttft >= 0) segs.push({ p: 1, g: 0, nodes: [span("首 token "), span(fmtLat(s.ttft), "VALUE")] });
-        if (s.tps != null) segs.push({ p: 2, g: 0, nodes: [span(fmtTps(s.tps) + " tok/s", "ACCENT")] });
+        if (s.tps != null) {
+          // 速度渐变（0.6.48 用户口径）：0 tok/s→红、400→紫，随流式/结算值实时变化
+          const sp = span(fmtTps(s.tps) + " tok/s");
+          sp.style.color = colorTps(s.tps);
+          segs.push({ p: 2, g: 0, nodes: [sp] });
+        }
         if (agg.rounds > 0 && agg.steps > 0) {
           // 会话累计轮/步:严格按用户口径渲染成 N轮N步
           segs.push({ p: 3, g: 1, nodes: [span(agg.rounds + "轮", "VALUE"), span(agg.steps + "步", "VALUE")] });
@@ -1106,7 +1142,10 @@
         if (agg.output > 0) segs.push({ p: 6, g: 1, nodes: [span("输出 "), span(fmtTok(agg.output), "VALUE")] });
         if (agg.input > 0) {
           const pct = (agg.cache / agg.input) * 100;
-          segs.push({ p: 5.6, g: 1, nodes: [span(" 平均命中 " + fmtPct(pct) + "%", "ACCENT")] });
+          // 命中率渐变（语义色）：0%→橙（命中低=贵）、100%→绿（命中高=省钱）
+          const sp = span(" 平均命中 " + fmtPct(pct) + "%");
+          sp.style.color = colorHit(pct);
+          segs.push({ p: 5.6, g: 1, nodes: [sp] });
         }
         if (today.total > 0) segs.push({ p: 7, g: 2, nodes: [span("总耗 "), span(fmtTok(today.total), "VALUE")] });
         segs.forEach((g, i) => {

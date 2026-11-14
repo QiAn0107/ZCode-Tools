@@ -181,7 +181,7 @@ check(/const room = bBottom - h\.bottom - GAP_TARGET/.test(src),
 check(/now - host\._fitAt > 1000/.test(src),
       "缺重量节流，布局/窗口变化后补偿不会刷新");
 check(!/parentRowGap/.test(src), "旧的 parentRowGap 猜测式补偿应已移除");
-check(/scriptVersion = "3\.23-settle"/.test(src), "脚本版本号未同步到 3.23-settle");
+check(/scriptVersion = "3\.26-dotbreath"/.test(src), "脚本版本号未同步到 3.26-dotbreath");
 
 // ---------- ⑤ 早到 delta pending 回放 ----------
 // 首批带 input 的 delta 常早于 turnHeader/respTurn 桥接到达：必须暂存待回放，
@@ -253,6 +253,18 @@ check(/latest\.lastUsageAt \|\| latest\.endedAt \|\| 0/.test(src) && /evAt \+ 30
 check(/snapshotTpsApplied/.test(src), "diag 缺 snapshotTpsApplied，兜底是否生效无法定位");
 check(/lastPushStamp/.test(src), "diag 缺 lastPushStamp，推送是否到达无法定位");
 check(/pushSubscribed/.test(src), "diag 缺 pushSubscribed，订阅是否成功无法定位");
+
+// ---------- ⑩ 状态点呼吸灯（0.6.49 用户口径） ----------
+// 生成中=琥珀呼吸灯（CSS keyframes,仅 opacity 合成器动画,零重排）,空闲=绿色静态;
+// 点节点必须跨 pill 重建复用——流式中 tok/s 每变一次就 innerHTML 重建一次,
+// 新建节点会让 CSS 动画不断从头播,呼吸感失效。
+check(/@keyframes ztpsBreath/.test(src), "缺 ztpsBreath keyframes，呼吸灯不成立");
+check(/pill\._zdot/.test(src) && /dot\._zbusy !== !!s\.streaming/.test(src),
+      "状态点没有跨重建复用+按 streaming 翻转改状态，呼吸动画会被重建不断重播");
+check(/"ztpsBreath 1\.6s ease-in-out infinite"/.test(src), "生成中没有挂呼吸动画");
+check(/dot\.style\.color = "#f59e0b"/.test(src) && /dot\.style\.color = "#4ade80"/.test(src),
+      "状态点双色缺失（生成中琥珀/空闲绿）");
+check(/dot\.style\.animation = ""/.test(src), "空闲时没有清掉呼吸动画（会一直闪）");
 
 function extractFn(name) {
   const head = "function " + name + "(";

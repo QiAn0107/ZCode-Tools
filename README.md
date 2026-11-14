@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.46-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.49-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -150,6 +150,21 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.49（状态点呼吸灯：对话运行中=琥珀呼吸灯，空闲=绿色静态）
+- 用户口径：左侧状态点从「常绿、流式加静态光晕」改为**生成中琥珀呼吸灯**（`#f59e0b` + `ztpsBreath` keyframes，1.6s 呼吸周期）、**空闲绿色静态**（`#4ade80`，动画清零）；空态（无数据）仍为绿点；
+- **实现关键**：呼吸动画只动 `opacity`（合成器动画，零重排零重绘）；状态点节点跨 pill 重建复用（`pill._zdot` + `dot._zbusy` 按 streaming 翻转才改状态）——流式中 tok/s 每次变化都会 `innerHTML=""` 重建胶囊，若每次新建节点，CSS 动画会不断从头播、呼吸感失效；
+- 测试：全量 366 项通过；daily-smoke 新增 §⑩（keyframes 存在/节点复用/动画挂载与清空/双色断言），`scriptVersion` 3.25-red0→3.26-dotbreath。
+
+#### 0.6.48（配色微调：tok/s 0 端橙→红 `#ef4444`，渐变变红→紫；命中率橙→绿不变）
+- 用户口径修正：tok/s 0 端锚点由橙改红（0.6.47 实装后反馈），400→紫不变，中点 200 = `#cc4d9e`，两端钳制不变；平均命中 0%→橙、100%→绿语义色保持不动；
+- 测试：全量 366 项通过；pct-smoke §④ 断言同步（红端/新中点/钳制），`scriptVersion` 3.24-colorramp→3.25-red0。
+
+#### 0.6.47（TPS 状态栏速度/命中率渐变配色：tok/s 0→400 tok/s 橙→紫，平均命中 0%→橙、100%→绿）
+- **tok/s 渐变**（用户口径）：0 tok/s → 橙 `#f97316`、400 tok/s → 紫 `#a855f7`，中间 RGB 线性插值（200 = `#d16487`），两端钳制（>400 与负值不越界）；流式与结算值实时随速变色，内容签名已含 `s.tps`，零额外重绘成本；
+- **平均命中渐变**（语义色）：0% → 橙（命中低=贵）、100% → 绿 `#22c55e`（命中高=省钱）；拼接路径不动（fmtPct 两位小数口径不变，pct-smoke 原 24 项断言全保留）；
+- 实现：`mixHex/colorTps/colorHit` 纯函数（`zcode-tps.js` 格式化区），渲染两段由固定 ACCENT 换为计算色，ACCENT 常量随之移除；绿点/首token/轮步/输入输出/总耗配色不动，亮暗主题下三个锚点色均可读；
+- **测试**：全量 366 项通过；`tps_pct_smoke.js` 新增 §④ 渐变色真跑（抠出 mixHex/colorTps/colorHit 求值：两端/中点/钳制/单调共 9 项 + 渲染路径必须经 colorTps/colorHit + 禁止 ACCENT 残留）；`scriptVersion` 3.23-settle→3.24-colorramp。
 
 #### 0.6.46（验证版：无功能变更——由 0.6.44 的版本烙印自动产生内容差异，实测「插件更新 → 角标数秒内亮起 → 确认应用」全链路）
 - 本版没有任何功能改动。0.6.44 起插件版本号烙进注入内容（`__ZP_VER__` → `ver:"0.6.x"`），版本一变生成内容必变 → 更新到本版时 check_state 必判 stale；
