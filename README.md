@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.40-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.41-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -150,6 +150,15 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.41（角标秒级亮起 + 退出后注入全程可见：主进程 stale 补触发 / check 并行 / 黑底金字进度小卡）
+- **角标不亮根因①（不依赖开会话）**：`SessionStart` 只在新会话第一轮触发——刚打开 ZCode 不开会话时 status 文件是上一会话的旧结论，插件刚更新时旧值 `pending:false` 让角标一直不亮（用户实测「有时候不显示」）。修复：`zcode:inject-status` 只读 handler 发现 status 缺失/损坏/时间戳过期(>30s)时，主进程按**指针文件**后台补触发一次 `sync.py --worker`（`windowsHide+detached+stdio:ignore`，一次性守卫防重复，失败静默不影响返回值；生成内容依旧零本机路径）；
+- **角标延迟根因②（sync 太慢）**：4 个 `--check` 子进程串行（每个在 385MB asar 上 2~3s，共 ~10s），status 文件最后才写。修复：`run_sync` 线程池并行预检（≈3s），判定循环按 `PATCHES` 原序串行不变；
+- **角标延迟根因③（渲染层轮询）**：固定 10s 轮询 + 首次挂载只有一次机会。修复：立即首查 + 1/2/4/8s 突发重查 + focus 补查；350ms 自愈升级为「待注入但未挂载也创建」（首轮 DOM 未就绪不再等 10s）；
+- **退出后注入进度可见（新）**：看护检测到 ZCode 退出、开始应用时弹右下角置顶**黑底金字 tkinter 进度小卡**（与角标同语言）：TPS 快照 → 各补丁批写入（绿=完成/红=失败）→ 指纹刷新 → 重启 ZCode；成功 ~1.5s 自动关窗，失败/预检未通过/找不到主程序**常驻到用户点掉**。应用阶段抽为 `_apply_phase`（工作线程）+ 主线程泵窗口（600s 子进程期间窗口不「未响应」）；无 tkinter 整体降级为旧行为，`_write_status` 新增 `phase` 字段兜底诊断；
+- **顺手纠正**：看护有失败项时退出码按 docstring 约定返回 1（旧代码失败也返回 0，与文档自相矛盾）；
+- **测试卫生（二次泄漏拆除）**：`TestDoctor.test_auto_fix_enables_plugin` 曾不打桩 sync 侧——mock 的「ZCode 运行中」走进 `auto_fix` 激活看护分支，真 `start_watchdog`（真 schtasks）全天在用户机器武装 DEV 树看护（`_sync.log` 08:32→12:59 十余条 arm 实证），未打桩类还会把真实指针文件改写指向开发仓库。现补齐全部桩（resolve_wanted/start_watchdog/resolve_v2_root/tps.main/LOG），跑套件后零新进程、零 arm、指针零污染；
+- **测试**：全量 353 项通过（新增并行屏障回归、READ handler 补触发断言、进度窗口 5 项、phase 字段；两个挂载冒烟更新）。
 
 #### 0.6.40（根治「注入→判旧→重排」死循环：生成内容副本无关 + sync 排期灭掉可见 cmd 窗口）
 - **死循环根因（日志实锤）**：apply-now handler 把插件副本的 scripts 目录/解释器在**注入期烤进**生成的 JS——cache / marketplaces / 开发仓库三个副本烤入的字节不同，任一副本应用后，其它副本的同步必判「含旧版组件」→ 应用→判旧→重排死循环；实测两代旧看护（0.6.38 副本 + 开发仓库副本）在同一退出点赛跑，仓库副本抢先写入旧内容并重启，角标于是再次亮起；

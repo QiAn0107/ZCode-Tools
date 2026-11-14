@@ -1412,9 +1412,32 @@ class TestInjectStatusBlock(unittest.TestCase):
         self.assertIn("zcode-patches-status.json", code)
         self.assertIn("no-status", code, "缺文件/损坏必须回可识别失败码，渲染层据此隐藏角标")
         self.assertIn("success:!1", code)
-        for banned in ("sqlite", "writeFileSync", "spawn", "execFile", "execSync",
-                       "fetch(", "https", "httpMod", "XMLHttpRequest", "child_process"):
+        # 0.6.41 起允许 spawn（stale 补触发 sync，见下一测试），但依然禁写禁联网
+        for banned in ("sqlite", "writeFileSync", "execFile", "execSync",
+                       "fetch(", "https", "httpMod", "XMLHttpRequest"):
             self.assertNotIn(banned, code, f"状态 handler 不得包含 {banned}")
+
+    def test_read_handler_respawns_stale_sync(self):
+        """★ 0.6.41：status 缺失/损坏/时间戳过期(>30s)时，主进程按指针文件后台补触发
+        一次 sync --worker。
+
+        SessionStart 只在新会话第一轮跑 sync —— 应用刚启动、用户还没开会话时
+        status 是上一会话的旧结论（插件刚更新时旧值 pending:false 会让角标一直
+        不亮，即「角标有时候不显示」）。一次性守卫防重复触发；触发全程兜底
+        静默，任何失败都不影响 handler 返回值；看护位置只认指针文件（副本
+        字节一致性红线）。"""
+        code = zp._INJECT_STATUS_READ_HANDLER
+        self.assertIn("30000", code, "stale 判定阈值 30s")
+        self.assertIn("__zpSyncSpawned", code, "一次性守卫，每次主进程运行最多触发一次")
+        self.assertIn("zcode-patches-scripts.json", code, "sync 位置只认指针文件")
+        self.assertIn('"--worker"', code)
+        self.assertIn("windowsHide", code)
+        self.assertIn("detached:!0", code)
+        self.assertIn('stdio:"ignore"', code)
+        self.assertIn("existsSync", code, "spawn 前必须校验 sync.py 存在")
+        self.assertIn("ch.unref()", code, "不阻塞主进程退出")
+        self.assertIn("spawn", code)
+        self.assertIn("node:child_process", code)
 
     def test_apply_handler_schedules_watchdog_then_quits(self):
         code = zp._INJECT_STATUS_APPLY_HANDLER
@@ -1521,6 +1544,10 @@ class TestInjectStatusBlock(unittest.TestCase):
         code = zp._inject_status_main_block("j").decode()
         harness = (
             "const j={handle:(ch,fn)=>{if(ch===\"zcode:inject-status\")global.__h=fn}};\n"
+            # ★ 泄漏防线：预置一次性守卫。本机有真实指针文件（指向已安装副本），
+            #   不预置的话 stale 路径会从测试里孵化出**真的** sync worker（0.6.38
+            #   的测试泄漏教训：真 run_sync 会真 schtasks 武装看护）。
+            "global.__zpSyncSpawned=!0;\n"
             + code
             + "\n(async()=>{const r=await global.__h({}, undefined);"
               "process.stdout.write(JSON.stringify({success:r&&r.success,"
@@ -1648,6 +1675,28 @@ class TestPatchStatusFile(unittest.TestCase):
             finally:
                 zp._v2_root = orig
 
+    def test_watchdog_write_status_phase_field(self):
+        """0.6.41：进度窗口之外的无窗降级也要能事后诊断——_write_status 带 phase
+        时必须落盘（正在写入补丁…/完成/完成（失败 N 项）），不带时不写字段。"""
+        import apply_after_exit as aae
+        with tempfile.TemporaryDirectory() as d:
+            orig = zp._v2_root
+            zp._v2_root = lambda override=None: Path(d)
+            try:
+                aae._write_status(True, phase="正在写入补丁…")
+                data = json.loads((Path(d) / "zcode-patches-status.json").read_text(encoding="utf-8"))
+                self.assertEqual(data["phase"], "正在写入补丁…")
+                self.assertTrue(data["pending"])
+                aae._write_status(False, phase="完成")
+                data = json.loads((Path(d) / "zcode-patches-status.json").read_text(encoding="utf-8"))
+                self.assertEqual(data["phase"], "完成")
+                self.assertFalse(data["pending"])
+                aae._write_status(False)          # 不带 phase → 不写字段
+                data = json.loads((Path(d) / "zcode-patches-status.json").read_text(encoding="utf-8"))
+                self.assertNotIn("phase", data)
+            finally:
+                zp._v2_root = orig
+
     def test_write_scripts_pointer(self):
         """渲染层 apply-now 据此定位**当前**副本的看护脚本：烤入路径在插件升级后
         会过期（0.6.38 实测甚至指向开发仓库，叠加 .cmd 编码问题导致看护静默夭折）。"""
@@ -1715,16 +1764,142 @@ class TestParseWantsUnknownKeys(unittest.TestCase):
     def test_unknown_keys_are_skipped_not_fatal(self):
         import apply_after_exit as aae
         with tempfile.TemporaryDirectory() as d:
-            wf = Path(d) / "_watchdog.want"
+            d = Path(d)
+            wf = d / "_watchdog.want"
             wf.write_text('{"usage_chart": false, "tps_footer": true, "model_puller": false}',
                           encoding="utf-8")
             orig = aae.WANT_FILE
+            orig_log = aae.LOG
             aae.WANT_FILE = wf
+            aae.LOG = d / "wd.log"       # 跳过日志别写进开发树真日志
             try:
                 tasks = aae.parse_wants([])
             finally:
                 aae.WANT_FILE = orig
+                aae.LOG = orig_log
             self.assertEqual(tasks, [(["--tps-footer"], False), (["--model-puller"], True)])
+
+
+class TestWatchdogProgress(unittest.TestCase):
+    """★ 0.6.41：应用阶段抽为 _apply_phase（可在线程运行）+ tkinter 进度小卡。
+
+    退出后用户必须能看见「看护跑没跑、跑到哪一步」（此前全程只有日志文件，
+    屏幕零反馈）。本类只测**逻辑层**：步骤上报顺序、成功/失败对窗口常驻
+    （keep_open）的影响、状态文件 phase 字段；UI 类本身全方法吞异常。全程打桩
+    （subprocess / resolve_install / zcode_running / 清理单例），绝不碰真客户端。"""
+
+    def setUp(self):
+        import apply_after_exit as aae
+        import tps_snapshot
+        self.aae = aae
+        self.tps = tps_snapshot
+        self._tmp = tempfile.TemporaryDirectory(prefix="zpatch-prog-",
+                                                ignore_cleanup_errors=True)
+        self.d = Path(self._tmp.name)
+        self._orig = (aae.LOG, aae.PID_FILE, aae.WANT_FILE, zp._v2_root,
+                      self.tps.resolve_v2_root, self.tps.main)
+        aae.LOG = self.d / "wd.log"
+        aae.PID_FILE = self.d / "_watchdog.pid"
+        aae.WANT_FILE = self.d / "_watchdog.want"
+        zp._v2_root = lambda override=None: self.d
+        self.tps.resolve_v2_root = lambda: self.d
+        self.tps.main = lambda *a, **k: None
+
+    def tearDown(self):
+        (self.aae.LOG, self.aae.PID_FILE, self.aae.WANT_FILE, zp._v2_root,
+         self.tps.resolve_v2_root, self.tps.main) = self._orig
+        self._tmp.cleanup()
+
+    def _run_phase(self, raw_tasks, rc_seq=None, exe=None, running=False):
+        from unittest import mock
+        import sync as sync_mod
+        if exe is None:   # resolve_install 返回的是 Path：relaunch 的 cwd 取 exe.parent
+            exe = (self.d / "resources", self.d / "resources" / "ZCode.exe")
+        reports, calls = [], []
+
+        class R:
+            def __init__(self, rc):
+                self.returncode = rc
+                self.stdout = b"ok"
+                self.stderr = b""
+
+        rcs = list(rc_seq or [])
+
+        def fake_run(cmd, **kw):
+            calls.append(list(cmd))
+            return R(rcs.pop(0) if rcs else 0)
+
+        orig_fp = sync_mod.refresh_client_fingerprint
+        sync_mod.refresh_client_fingerprint = lambda: None
+        try:
+            with mock.patch.object(self.aae, "zcode_running", lambda: running), \
+                 mock.patch.object(self.aae, "resolve_install", lambda: exe), \
+                 mock.patch.object(self.aae, "_cleanup_singletons", lambda pid: None), \
+                 mock.patch.object(self.aae.subprocess, "run", fake_run), \
+                 mock.patch.object(self.aae.subprocess, "Popen", lambda *a, **k: None):
+                code, keep_open, msg = self.aae._apply_phase(
+                    raw_tasks, 12, os.getpid(),
+                    lambda kind, text, ok=None: reports.append((kind, text, ok)))
+        finally:
+            sync_mod.refresh_client_fingerprint = orig_fp
+        return code, keep_open, msg, reports, calls
+
+    def _status(self):
+        return json.loads((self.d / "zcode-patches-status.json")
+                          .read_text(encoding="utf-8"))
+
+    def test_success_reports_steps_and_relaunches(self):
+        code, keep_open, msg, reports, calls = self._run_phase(
+            [(["--tps-footer"], False)])
+        self.assertEqual((code, keep_open), (0, False), msg)
+        self.assertIn("完成", msg)
+        kinds = [(k, t) for k, t, _ in reports]
+        self.assertIn(("step", "刷新 TPS 用量快照…"), kinds, "第一步必须是 TPS 快照")
+        self.assertIn(("step", "写入 TPS 状态栏…"), kinds, "批量写入要有用户可读步骤名")
+        self.assertIn(("result", "写入 TPS 状态栏：完成"), kinds)
+        self.assertTrue(any(k == "result" and t == "写入 TPS 状态栏：完成" and ok is True
+                            for k, t, ok in reports), "完成的步骤必须标绿")
+        self.assertIn(("step", "正在重新启动 ZCode…"), kinds)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("zcode_patcher.py", calls[0][1])
+        self.assertEqual(calls[0][2:], ["--tps-footer"])
+        self.assertFalse(self._status()["pending"], "全成功 → 角标必须消失")
+        self.assertEqual(self._status()["phase"], "完成")
+
+    def test_failure_keeps_window_open(self):
+        code, keep_open, msg, reports, _calls = self._run_phase(
+            [(["--tps-footer"], False)], rc_seq=[1])
+        self.assertEqual((code, keep_open), (1, True), "有失败项 → 窗口必须常驻等用户点掉")
+        self.assertIn("失败", msg)
+        self.assertIn(("result", "写入 TPS 状态栏：失败", False), reports)
+        st = self._status()
+        self.assertTrue(st["pending"])
+        self.assertIn("失败", st["last_error"])
+        self.assertEqual(st["phase"], "完成（失败 1 项）")
+
+    def test_precheck_refused_aborts_remaining_batches(self):
+        # 同方向任务会合并为一批（batch_tasks 语义）；批 rc=2（ZCode 被重新拉起）
+        # → 立即放弃，后续批次不再执行
+        code, keep_open, msg, reports, calls = self._run_phase(
+            [(["--tps-footer"], False), (["--inject-status"], False)],
+            rc_seq=[2, 0])
+        self.assertEqual((code, keep_open), (1, True))
+        self.assertIn("预检未通过", msg)
+        self.assertEqual(len(calls), 1, "rc=2 后必须立即放弃剩余批次")
+        self.assertIn(("result", "写入 TPS 状态栏、注入状态角标：预检未通过（ZCode 被重新拉起）",
+                       False), reports)
+        st = self._status()
+        self.assertTrue(st["pending"])
+        self.assertIn("预检未通过", st["last_error"])
+
+    def test_missing_exe_reports_manual_start(self):
+        code, keep_open, msg, _reports, _calls = self._run_phase(
+            [(["--tps-footer"], False)], exe=(None, None))
+        self.assertEqual((code, keep_open), (1, True))
+        self.assertIn("手动启动", msg)
+
+    def test_progress_available_never_raises(self):
+        self.assertIn(self.aae._progress_available(), (True, False))
 
 
 class TestEnhancePromptScript(unittest.TestCase):
@@ -2014,8 +2189,17 @@ class TestDoctor(unittest.TestCase):
         self.assertEqual(doctor._prefix_entries(None, "options"), {})
 
     def test_auto_fix_enables_plugin(self):
-        """auto_fix 必须能将 disabled 的 enabledPlugins 修复为 true。"""
+        """auto_fix 必须能将 disabled 的 enabledPlugins 修复为 true。
+
+        ★ 泄漏防线（0.6.41）：本测试曾不打桩 sync 侧 —— mock 的 zcode_running=True
+        正好走进 auto_fix 的「运行中 → 激活看护」分支，里面是**真**
+        `sync.resolve_wanted()`（读用户真配置）+ `sync.start_watchdog(wanted)`
+        （真 schtasks 武装 DEV 树看护）。实测：2026-11-14 全天每次跑套件都在
+        用户机器上武装了一个 DEV 看护（_sync.log 08:32→12:59 十余条
+        「已启动退出后看护」全是它），用户一旦退出 ZCode 就会被 DEV 树注入。
+        resolve_wanted/start_watchdog/doctor.subprocess 全部打桩，绝不真跑。"""
         import doctor
+        import sync as sync_mod
         with tempfile.TemporaryDirectory() as d:
             cfg_path = Path(d) / "config.json"
             cfg_path.write_text(json.dumps({
@@ -2026,10 +2210,15 @@ class TestDoctor(unittest.TestCase):
             }), encoding="utf-8")
             orig_find = doctor._find_configs
             orig_zp = doctor._load_patcher
+            orig_resolve = sync_mod.resolve_wanted
+            orig_watchdog = sync_mod.start_watchdog
+            armed = []
             doctor._find_configs = lambda: [cfg_path]
             mock_zp = unittest.mock.MagicMock()
             mock_zp.zcode_running.return_value = True
             doctor._load_patcher = lambda: mock_zp
+            sync_mod.resolve_wanted = lambda: ({"tps_footer": True}, "测试")
+            sync_mod.start_watchdog = lambda wanted: armed.append(dict(wanted))
             try:
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
@@ -2038,9 +2227,13 @@ class TestDoctor(unittest.TestCase):
                 fixed = json.loads(cfg_path.read_text(encoding="utf-8"))
                 self.assertTrue(fixed["plugins"]["enabled"])
                 self.assertTrue(fixed["plugins"]["enabledPlugins"]["zcode-tools@market"])
+                self.assertEqual(armed, [{"tps_footer": True}],
+                                 "看护只许经打桩激活（记录到 armed），绝不真跑")
             finally:
                 doctor._find_configs = orig_find
                 doctor._load_patcher = orig_zp
+                sync_mod.resolve_wanted = orig_resolve
+                sync_mod.start_watchdog = orig_watchdog
 
     def test_manifest_version_reads_both_layouts(self):
         import doctor
@@ -2070,18 +2263,24 @@ class TestSyncHeartbeat(unittest.TestCase):
 
     def setUp(self):
         import sync
+        import tps_snapshot
         self.sync = sync
-        self._orig = (sync.CONFIG, sync.STAMP, sync.LOG, sync.MARKER)
+        self.tps = tps_snapshot
+        self._orig = (sync.CONFIG, sync.STAMP, sync.LOG, sync.MARKER,
+                      tps_snapshot.resolve_v2_root, tps_snapshot.main)
         self._tmp = tempfile.TemporaryDirectory(prefix="zpatch-hb-", ignore_cleanup_errors=True)
         d = Path(self._tmp.name)
         sync.CONFIG = d / "config.json"       # 故意不存在
         sync.STAMP = d / "_sync.last"
         sync.LOG = d / "_sync.log"
         sync.MARKER = d / "_autoinject.done"  # 别把标记写进真实安装目录
+        tps_snapshot.resolve_v2_root = lambda: d
+        tps_snapshot.main = lambda *a, **k: None
 
     def tearDown(self):
         (self.sync.CONFIG, self.sync.STAMP, self.sync.LOG,
-         self.sync.MARKER) = self._orig
+         self.sync.MARKER) = self._orig[:4]
+        (self.tps.resolve_v2_root, self.tps.main) = self._orig[4:6]
         self._tmp.cleanup()
 
     def test_beat_writes_timestamp_and_message(self):
@@ -2125,9 +2324,12 @@ class TestSyncModes(unittest.TestCase):
 
     def setUp(self):
         import sync
+        import tps_snapshot
         self.sync = sync
+        self.tps = tps_snapshot
         self._orig = (sync.CONFIG, sync.STAMP, sync.LOG, sync.MARKER,
-                      sync.CLIENT_FINGERPRINT, list(sys.argv))
+                      sync.CLIENT_FINGERPRINT, tps_snapshot.resolve_v2_root,
+                      tps_snapshot.main, list(sys.argv))
         self._tmp = tempfile.TemporaryDirectory(prefix="zpatch-mode-", ignore_cleanup_errors=True)
         d = Path(self._tmp.name)
         sync.CONFIG = d / "config.json"       # 故意不存在
@@ -2135,11 +2337,15 @@ class TestSyncModes(unittest.TestCase):
         sync.LOG = d / "_sync.log"
         sync.MARKER = d / "_autoinject.done"  # 别把标记写进真实安装目录
         sync.CLIENT_FINGERPRINT = d / "_client_fingerprint.json"  # 指纹同理（--detach 会写）
+        # run_sync 收尾会写真 v2 状态/指针文件 + 刷新真 TPS 快照 —— 全部指到临时目录
+        tps_snapshot.resolve_v2_root = lambda: d
+        tps_snapshot.main = lambda *a, **k: None
 
     def tearDown(self):
         (self.sync.CONFIG, self.sync.STAMP, self.sync.LOG,
          self.sync.MARKER, self.sync.CLIENT_FINGERPRINT) = self._orig[:5]
-        sys.argv[:] = self._orig[5]
+        (self.tps.resolve_v2_root, self.tps.main) = self._orig[5:7]
+        sys.argv[:] = self._orig[7]
         self._tmp.cleanup()
 
     def _run(self, *args):
@@ -2192,6 +2398,73 @@ class TestSyncModes(unittest.TestCase):
         self.assertEqual(buf.getvalue(), "")
 
 
+class TestSyncParallelChecks(unittest.TestCase):
+    """★ 0.6.41：run_sync 的全部 --check 子进程必须并行跑。
+
+    每个 --check 都要在 385MB asar 上跑 2~3s，串行 4 个 ≈10s —— 而 status 文件
+    （角标的真相源）在全部 check 完成后才写，角标就跟着多等 ~10s（用户实测
+    「角标很久才显示」的成因之一）。--check 是纯只读子进程、互相独立 → 线程池
+    并发；判定循环仍按 PATCHES 原序串行（run_patcher 保持串行）。"""
+
+    def setUp(self):
+        import sync
+        import tps_snapshot
+        self.sync = sync
+        self.tps = tps_snapshot
+        self._orig = (sync.CONFIG, sync.STAMP, sync.LOG, sync.MARKER,
+                      sync.CLIENT_FINGERPRINT, self.tps.resolve_v2_root,
+                      self.tps.main, list(sys.argv))
+        self._tmp = tempfile.TemporaryDirectory(prefix="zpatch-par-",
+                                                ignore_cleanup_errors=True)
+        d = Path(self._tmp.name)
+        sync.CONFIG = d / "config.json"
+        sync.STAMP = d / "_sync.last"
+        sync.LOG = d / "_sync.log"
+        sync.MARKER = d / "_autoinject.done"
+        sync.CLIENT_FINGERPRINT = d / "_client_fingerprint.json"
+        self.tps.resolve_v2_root = lambda: Path(d)
+        self.tps.main = lambda *a, **k: None
+        sync.CONFIG.write_text(json.dumps(
+            {"plugins": {"options": {"zcode-tools@zcode-tools": {
+                "tps_footer": True, "enhance_prompt": True,
+                "model_puller": True, "inject_status": True}}}}),
+            encoding="utf-8")
+
+    def tearDown(self):
+        (self.sync.CONFIG, self.sync.STAMP, self.sync.LOG,
+         self.sync.MARKER, self.sync.CLIENT_FINGERPRINT) = self._orig[:5]
+        self.tps.resolve_v2_root, self.tps.main = self._orig[5:7]
+        sys.argv[:] = self._orig[7]
+        self._tmp.cleanup()
+
+    def test_checks_run_concurrently(self):
+        import threading
+        barrier = threading.Barrier(4)
+        idents = []
+        lock = threading.Lock()
+
+        def fake_check(args):
+            # 4 个 check 必须同时到齐；串行实现第一个 wait 就超时 → 测试直接红
+            barrier.wait(timeout=10)
+            with lock:
+                idents.append(threading.get_ident())
+            return "on"
+
+        orig = (self.sync.check_state, self.sync.run_patcher,
+                self.sync.start_watchdog)
+        self.sync.check_state = fake_check
+        self.sync.run_patcher = lambda args, revert: "ok"
+        self.sync.start_watchdog = lambda wanted: None
+        try:
+            self.sync.run_sync(echo=False)
+        finally:
+            (self.sync.check_state, self.sync.run_patcher,
+             self.sync.start_watchdog) = orig
+        self.assertEqual(len(idents), 4, "四个补丁的 --check 都要跑")
+        self.assertGreaterEqual(len(set(idents)), 2, "必须落在多个线程上（并行）")
+        self.assertFalse(barrier.broken)
+
+
 class TestWatchdogScheduledTask(unittest.TestCase):
     """★ 回归：ZCode 退出时看护必须活着。
 
@@ -2205,6 +2478,15 @@ class TestWatchdogScheduledTask(unittest.TestCase):
     def setUp(self):
         import sync
         self.sync = sync
+        # _start_watchdog_task 的失败/清理日志别写进开发树真日志
+        self._tmp = tempfile.TemporaryDirectory(prefix="zpatch-task-",
+                                                ignore_cleanup_errors=True)
+        self._orig_log = self.sync.LOG
+        self.sync.LOG = Path(self._tmp.name) / "_sync.log"
+
+    def tearDown(self):
+        self.sync.LOG = self._orig_log
+        self._tmp.cleanup()
 
     def _fake_run(self, calls, fail_on=None):
         class R:
@@ -2287,18 +2569,25 @@ class TestSyncStaleIsReinjected(unittest.TestCase):
 
     def setUp(self):
         import sync
+        import tps_snapshot
         self.sync = sync
-        self._orig = (sync.CONFIG, sync.STAMP, sync.LOG, sync.MARKER)
+        self.tps = tps_snapshot
+        self._orig = (sync.CONFIG, sync.STAMP, sync.LOG, sync.MARKER,
+                      tps_snapshot.resolve_v2_root, tps_snapshot.main)
         self._tmp = tempfile.TemporaryDirectory(prefix="zpatch-stale-", ignore_cleanup_errors=True)
         d = Path(self._tmp.name)
         sync.CONFIG = d / "config.json"        # 不存在 → 走插件清单默认值（全开）
         sync.STAMP = d / "_sync.last"
         sync.LOG = d / "_sync.log"
         sync.MARKER = d / "_autoinject.done"
+        # stale 判定走 run_sync 时会写真 v2 状态文件 + 刷新真 TPS 快照 —— 全隔离
+        tps_snapshot.resolve_v2_root = lambda: d
+        tps_snapshot.main = lambda *a, **k: None
 
     def tearDown(self):
         (self.sync.CONFIG, self.sync.STAMP, self.sync.LOG,
-         self.sync.MARKER) = self._orig
+         self.sync.MARKER) = self._orig[:4]
+        (self.tps.resolve_v2_root, self.tps.main) = self._orig[4:6]
         self._tmp.cleanup()
 
     # ---------- check_state 必须把「内容旧」和「已最新」分开 ----------
@@ -2433,6 +2722,15 @@ class TestRunPatcherVerdict(unittest.TestCase):
     def setUp(self):
         import sync
         self.sync = sync
+        # run_patcher 的判定过程会写 _sync.log —— 别把测试噪音写进开发树真日志
+        self._tmp = tempfile.TemporaryDirectory(prefix="zpatch-verdict-",
+                                                ignore_cleanup_errors=True)
+        self._orig_log = self.sync.LOG
+        self.sync.LOG = Path(self._tmp.name) / "_sync.log"
+
+    def tearDown(self):
+        self.sync.LOG = self._orig_log
+        self._tmp.cleanup()
 
     def _verdict(self, out: str, rc: int = 0) -> str:
         orig = self.sync.subprocess.run
@@ -2651,11 +2949,18 @@ class TestAutoInject(unittest.TestCase):
 
     def setUp(self):
         import sync
+        import tps_snapshot
         self.sync = sync
+        self.tps = tps_snapshot
         self._tmp = tempfile.TemporaryDirectory(prefix="zpatch-auto-", ignore_cleanup_errors=True)
         self._d = Path(self._tmp.name)
+        # 本类的 run_sync 判定测试会写 v2 状态/指针文件 —— 指到临时目录
+        self._tps_orig = (self.tps.resolve_v2_root, self.tps.main)
+        self.tps.resolve_v2_root = lambda: self._d
+        self.tps.main = lambda *a, **k: None
 
     def tearDown(self):
+        (self.tps.resolve_v2_root, self.tps.main) = self._tps_orig
         self._tmp.cleanup()
 
     def _resolve(self, opts, source, defaults):

@@ -99,6 +99,22 @@ python "<skill目录>/scripts/doctor.py" --where  # 只查「插件装在哪」+
 - **钩子是「登记心跳 + 后台化」就返回**（`sync.py --detach` → 子进程 `--worker`）。
   原因：hook 是**内联**执行的（`async` 字段当前无运行时效果），而同步要跑多次 `--check`
   （每次约 2 秒），同步做完再返回会拖住会话启动，还可能撞上钩子超时被砍掉。
+- **`--check` 并行跑**（0.6.41）：`run_sync` 用线程池并发跑全部 wanted 键的 `--check`
+  （纯只读子进程、互相独立），4 项串行 ≈10s → ≈3s——status 文件在全部 check 完成后才写，
+  这 10s 直接拖后角标亮起时间。判定循环仍按 `PATCHES` 原序串行（`run_patcher` 保持串行）。
+- **主进程 stale 补触发**（0.6.41）：`SessionStart` 只在**新会话第一轮**触发——应用刚启动、
+  用户还没开会话时 status 文件是上一会话的旧结论（插件刚更新时旧值 `pending:false` 会让
+  角标一直不亮）。所以 `zcode:inject-status` 只读 handler 发现 status 缺失/损坏/时间戳
+  过期(>30s)时，按**指针文件**后台补触发一次 `sync.py --worker`（守卫保证每次主进程运行
+  最多一次；`windowsHide+detached+stdio:ignore`，失败静默不影响返回值）。sync 位置只认
+  指针文件，**生成内容依旧零本机路径**（副本字节一致性红线）。
+- **退出后注入进度可见**（0.6.41）：看护检测到 ZCode 退出、开始应用时，弹黑底金字
+  tkinter 进度小卡（右下角置顶，与角标同语言），逐步显示 TPS 快照 → 各补丁批写入
+  （完成/失败）→ 指纹刷新 → 重启 ZCode；成功 ~1.5s 自动关窗，**失败常驻到用户点掉**。
+  应用阶段抽为 `_apply_phase`（工作线程）+ 主线程泵窗口（避免子进程最长 600s 期间
+  「未响应」）；无 tkinter / 建窗失败 → 无窗降级，行为与旧版一致，`_write_status` 的
+  `phase` 字段（正在写入补丁…/完成/完成（失败 N 项））仍可事后诊断。有失败项时退出码
+  对齐 docstring 约定返回 1（旧代码失败也返回 0，与文档自相矛盾，顺手纠正）。
 - **首次自动注入时往会话里发一条说明**（`emit_notice()`），让「到底做没做」看得见；
   标记文件 `scripts/_autoinject.done` 保证只出一次。输出只用**顶层 `additionalContext`**：
   内核 `Lio()` 里 `t.additionalContext && n.additionalContexts.push(...)` 是**无条件**消费的，
@@ -444,10 +460,11 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 
 **注入状态角标链路**（0.6.38，`--inject-status`）：
 
-9. 状态真相源 = `<base>/.zcode/v2/zcode-patches-status.json`（base 服从 dataBaseDir）：**sync.py `run_sync()` 收尾写**（有分歧 → `pending:true` + items；全一致 → `false`），**看护 `apply_after_exit._write_status` 应用后回写**（成功 → `false`；失败/预检未通过 → 保持 `true` + `last_error`）——双写保证任一环失败角标也不说谎。渲染层 `zcode-inject-status.js` 10s 轮询 `zcode:inject-status` IPC（main 只读 handler，缺文件回 `no-status` → 隐藏角标），pending 时在左上标题条（返回/前进按钮所在行）挂黑底金字「待注入」角标，找不到锚点退化为固定位置兜底（`__zinjDiag.mountMode` 可查实况）。
+9. 状态真相源 = `<base>/.zcode/v2/zcode-patches-status.json`（base 服从 dataBaseDir）：**sync.py `run_sync()` 收尾写**（有分歧 → `pending:true` + items；全一致 → `false`），**看护 `apply_after_exit._write_status` 应用后回写**（成功 → `false`；失败/预检未通过 → 保持 `true` + `last_error`，0.6.41 起还带 `phase` 进度标记）——双写保证任一环失败角标也不说谎。渲染层 `zcode-inject-status.js` 轮询 `zcode:inject-status` IPC（main 只读 handler，缺文件回 `no-status` → 隐藏角标）：**立即首查 + 启动突发重查（1/2/4/8s）+ 10s 稳态 + visibilitychange/focus 补查**（0.6.41——status 文件常在启动后数秒才落，固定 10s 会让角标多等近 10s）；350ms 自愈兼管**首次挂载创建**（旧逻辑只扶正已有角标，首轮 DOM 未就绪要等 10s）。pending 时在左上标题条（返回/前进按钮所在行）挂黑底金字「待注入」角标，找不到锚点退化为固定位置兜底（`__zinjDiag.mountMode` 可查实况）。
 10. 一键应用链路：点角标 → 原生风格确认弹窗（说明将**完全退出 ZCode**、未发送草稿会中断，Esc/取消/遮罩均可关闭）→ 确认调 `zcode:apply-patches-now`（main handler）→ 复核 pending → `schtasks /Create + /Run ZCodePatchApply`，**`/TR` 直接给「pythonw + apply_after_exit.py」两个带引号路径，不落 .cmd 中间文件**（0.6.39/0.6.40：Task Scheduler 以 UTF-16 存任务，避开「cmd.exe 按 ANSI 解析 .cmd、非 ASCII 安装路径变乱码 → 看护静默夭折」与「整个等待期挂一个可见 cmd 控制台窗口」两个实测坑；**sync 的排期同样直写 /TR**）；`/TR` 不带 `--want` → 看护合并 `_watchdog.want`；/Create//Run 结果**追加进看护日志**（`[apply-now]` 行，静默失败必须有迹可循）→ 200ms 后 `app.quit()`（quit 被应用自身拦截时 5s 后 `app.exit(0)` 强退兜底）→ 看护等退出、写补丁、拉起 ZCode。任何一步失败都原样返回 `{success:!1}` **不退出**，渲染层 toast 提示。
 11. **看护脚本定位 = 指针文件唯一真相源 + 生成内容副本无关**（0.6.40）：`<v2>/zcode-patches-scripts.json`（scripts_dir + python，sync 每次同步写）是唯一来源，指针缺失回 `no-pointer` 结构化报错引导重启。★ 生成内容**不得含任何本机路径**——此前把副本 scripts 目录/解释器在注入期烤进 JS，cache/marketplaces/开发仓库三个副本烤入字节不同 → 副本间互判「含旧版组件」→ 应用→判旧→重排死循环（0.6.39 实测两代旧看护赛跑、新版同步永远判 stale）。看护应用成功后还须 `sync.refresh_client_fingerprint()`：重打包改了 asar 尺寸，不刷新的话下次 detect_upgrade 会把「我们自己刚做的重打包」误判成客户端升级，弹假通知。
 11. **看护单例跨版本共享锁**（0.6.39）：`<v2>/zcode-watchdog.pid`。插件每个版本副本各有自己的 `_watchdog.pid`，升级前后两个版本的看护可能同时等待——各查各的 pid 会双双放行，退出后并发重打包同一个 asar（一方必 rc!=0）。看护启动时同时查共享锁，活看护在 → 合并需求后退出。看护应用成功后还须 `sync.refresh_client_fingerprint()`：重打包改了 asar 尺寸，不刷新的话下次 detect_upgrade 会把「我们自己刚做的重打包」误判成客户端升级，弹假通知。
+12. **退出后进度小卡**（0.6.41）：看护等到 ZCode 退出、有活要干时（等待期数小时不弹窗），用 tkinter 弹右下角置顶黑底金字小卡：TPS 快照 → 各补丁批写入（绿=完成/红=失败）→ 指纹刷新 → 重启 ZCode，每步经 `queue` 由工作线程传主线程刷 UI（子进程最长 600s 期间窗口不「未响应」）。成功 ~1.5s 自动关闭；有失败项 / 预检未通过 / 找不到主程序 / 重启失败 → 常驻 + 「关闭」按钮。无 tkinter 时整条降级为旧行为（仅日志），`phase` 字段兜底诊断。**测试红线**：`TestDoctor.test_auto_fix_enables_plugin` 曾不打桩 sync 侧——mock 的 `zcode_running=True` 走进 `auto_fix` 的「激活看护」分支，真 `start_watchdog`（真 schtasks）全天武装 DEV 树看护（_sync.log 十余条 arm 实证）；凡触 sync/watchdog 的测试必须打桩 `resolve_wanted/start_watchdog/resolve_v2_root/tps.main`，跑完套件后要查无新 pythonw、无新 arm 行。
 
 ### 注入原理（asar 重打包级）
 

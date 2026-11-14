@@ -180,9 +180,12 @@ function buildEnv({ pending = true, withBridge = true, navRow = true }) {
     applyPatchesNow: async () => { applyCalls++; return { success: !0 }; },
   };
 
+  const win = withBridge ? { zcode: bridge } : {};
+  win.addEventListener = () => {};        // 0.6.41: focus 补查监听（桩不真跑）
+  win.removeEventListener = () => {};
   const ctx = {
     document: doc,
-    window: withBridge ? { zcode: bridge } : {},
+    window: win,
     console: { log() {}, warn() {}, error() {} },
     setInterval: () => 0,          // 轮询不真跑，靠 flush() 手动驱动
     setTimeout: () => 0,           // toast 的移除定时器不真跑，DOM 里就能断言到
@@ -314,6 +317,20 @@ async function main() {
   await runScript(env);
   expect(!env.icon(), "F: 无桥时不应出现角标");
   expect(env.diag().bridge === false, "F: diag.bridge 应为 false");
+}
+
+// ---- 场景 G：角标及时性（0.6.41）——启动突发重查 + focus 补查 + 自愈覆盖首次挂载
+// sync 的 status 文件常在启动后数秒才写，固定 10s 轮询会让角标多等近 10s；
+// 首次挂载若撞上 DOM 未就绪，旧逻辑要等下一个 10s 轮询才重试。
+{
+  expect(src.includes("for (const d of [1000, 2000, 4000, 8000]) setTimeout(poll, d)"),
+         "G: 必须保留启动突发重查（1/2/4/8s）");
+  expect(src.includes('window.addEventListener("focus"'),
+         "G: 必须监听 focus 事件补查");
+  expect(src.includes("diag.pending || document.getElementById(BTN_ID)"),
+         "G: 350ms 自愈必须覆盖「待注入但未挂载」的首次创建");
+  expect(src.includes('setInterval(poll, 10000)'),
+         "G: 10s 稳态轮询必须保留");
 }
 }
 

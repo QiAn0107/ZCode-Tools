@@ -31,6 +31,7 @@ import re
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 try:                                   # 控制台编码/窗口安全网（见 _console.py 的说明）
@@ -570,12 +571,22 @@ def run_sync(echo: bool = False) -> str:
     if not wanted:
         return "既没有已保存的开关，也读不到插件清单默认值 → 未做任何操作"
 
+    # 并行预检：--check 是纯只读子进程，但每个要在 385MB asar 上跑 2~3s，串行 4 个
+    # 会把 status 文件的落地（=角标亮起时间）拖后 ~10s。各项互相独立 → 线程池并发
+    # 跑完，再按 PATCHES 原序做下面的判定；check_state 异常仍在收集点原样抛出。
+    wanted_keys = [(key, args, repack, wanted[key])
+                   for key, args, repack in PATCHES if key in wanted]
+    states: dict = {}
+    if wanted_keys:
+        with ThreadPoolExecutor(max_workers=min(4, len(wanted_keys))) as pool:
+            futs = [(key, pool.submit(check_state, args))
+                    for key, args, _, _ in wanted_keys]
+            for key, fut in futs:
+                states[key] = fut.result()
+
     changed, deferred, failed, skipped, refreshed = [], {}, [], [], []
-    for key, args, repack in PATCHES:
-        if key not in wanted:
-            continue
-        want = wanted[key]
-        state = check_state(args)
+    for key, args, repack, want in wanted_keys:
+        state = states[key]
         if state == "na":
             skipped.append(key)          # 本版本不需要这个补丁（如 3.14+ 的内核补丁）
             continue

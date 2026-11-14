@@ -333,10 +333,13 @@
     diag.mountMode = null;
   }
 
-  // 350ms 自愈（仅在角标存在期间有效，无角标时此轮询零开销短路）
+  // 350ms 自愈：已挂载则扶正位置；待注入但还没挂上（首轮 DOM 未就绪等）也补挂——
+  // 首次挂载的重试间隔从「下一个 10s 轮询」收紧到 350ms
   setInterval(() => {
     if (document.hidden) return;
-    if (document.getElementById(BTN_ID)) ensureIcon();
+    if (diag.pending || document.getElementById(BTN_ID)) {
+      try { ensureIcon(); } catch (_) { /* DOM 未就绪，下个 tick 再试 */ }
+    }
   }, 350);
 
   // ------------------------------------------------------------ 确认弹窗
@@ -443,13 +446,19 @@
     } catch (e) {
       diag.lastError = String(e && e.message || e);
     }
-    if (diag.pending) ensureIcon();
-    else removeIcon();
+    try {
+      if (diag.pending) ensureIcon();
+      else removeIcon();
+    } catch (_) { /* DOM 未就绪，自愈/下个 tick 再试 */ }
   }
 
+  // 轮询节奏：立即首查 + 启动初期突发补查（sync 的 status 文件常在启动后数秒才写，
+  // 固定 10s 会让角标多等近 10s）+ 10s 稳态；visibilitychange / focus 时立即补查
   setInterval(poll, 10000);
+  for (const d of [1000, 2000, 4000, 8000]) setTimeout(poll, d);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) poll();
   });
+  window.addEventListener("focus", () => poll());
   poll();
 })();
