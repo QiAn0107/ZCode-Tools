@@ -42,6 +42,10 @@ except ImportError:                    # 被别处 import 时脚本目录可能�
 HERE = Path(__file__).resolve().parent
 PATCHER = HERE / "zcode_patcher.py"
 WATCHDOG = HERE / "apply_after_exit.py"
+# Windows 用一次性计划任务启动看护：Task Scheduler 启动的进程不在 ZCode 的
+# Job 对象里，ZCode 退出时不会被 KILL_ON_JOB_CLOSE 连带结束。
+SCHTASK_NAME = "ZCodePatchApply"
+SCHTASK_CMD = HERE / "_watchdog_task.cmd"
 CONFIG = Path.home() / ".zcode" / "cli" / "config.json"
 # 插件 id 会随安装方式变化（本地 dev-default-xxxx、市场安装的 id 等），
 # 因此按前缀匹配而不是写死某个 id —— 换台机器/换安装方式也能正确定位配置。
@@ -363,6 +367,54 @@ def run_patcher(args, revert: bool) -> str:
     return verdict
 
 
+def _start_watchdog_task(args: list[str]) -> bool:
+    """Windows：用一次性计划任务启动看护，绕开 ZCode 的 Job 对象。
+
+    为什么不能只靠 Popen：Electron/Chromium 会把子进程放进带
+    KILL_ON_JOB_CLOSE 的 Job，ZCode 退出时整棵树被结束；DETACHED_PROCESS
+    不脱离 Job，CREATE_BREAKAWAY_FROM_JOB 又被 Job 拒绝（实测 WinError 5）。
+    Task Scheduler 启动的进程不属于该 Job，才能活到 ZCode 退出之后。
+
+    任务只负责「立即启动一次」：/Run 后立刻 /Delete 定义 —— 删除定义不会
+    终止已在运行的实例（实测），也避免 23:59 占位时间到点后再拉一份。
+    命令写进短路径 .cmd，避开 schtasks /TR 的 262 字符限制。
+    """
+    kw = {"capture_output": True, "encoding": "utf-8", "errors": "replace",
+          "timeout": 30}
+    try:
+        exe = sys.executable or "python"
+        pyw = Path(exe).with_name("pythonw.exe")
+        if pyw.is_file():
+            exe = str(pyw)          # GUI 子系统：计划任务里不闪控制台
+        # start /wait 让 .cmd 一直持有看护进程，任务实例不会提前结束；
+        # 删除任务定义只删计划项，不会杀掉这个已启动的进程。
+        body = ("@echo off\r\n"
+                + f'start "" /wait "{exe}" "{WATCHDOG}" ' + " ".join(args) + "\r\n")
+        try:
+            SCHTASK_CMD.write_text(body, encoding="mbcs")
+        except Exception:
+            SCHTASK_CMD.write_text(body, encoding="utf-8")
+        created = subprocess.run(
+            ["schtasks", "/Create", "/TN", SCHTASK_NAME, "/TR", f'"{SCHTASK_CMD}"',
+             "/SC", "ONCE", "/ST", "23:59", "/F"], **kw, **no_window_kwargs())
+        if created.returncode != 0:
+            log(f"计划任务创建失败（回退分离进程）: {created.stdout}{created.stderr}")
+            return False
+        started = subprocess.run(["schtasks", "/Run", "/TN", SCHTASK_NAME],
+                                 **kw, **no_window_kwargs())
+        if started.returncode != 0:
+            log(f"计划任务启动失败（回退分离进程）: {started.stdout}{started.stderr}")
+            return False
+        cleaned = subprocess.run(["schtasks", "/Delete", "/TN", SCHTASK_NAME, "/F"],
+                                 **kw, **no_window_kwargs())
+        if cleaned.returncode != 0:
+            log(f"计划任务清理失败（不影响本次看护）: {cleaned.stdout}{cleaned.stderr}")
+        return True
+    except Exception as exc:
+        log(f"计划任务启动异常（回退分离进程）: {exc!r}")
+        return False
+
+
 def start_watchdog(wanted: dict) -> None:
     """启动退出后看护：等 ZCode 退出 → 应用重打包级补丁。"""
     if not wanted:
@@ -392,6 +444,11 @@ def start_watchdog(wanted: dict) -> None:
             pass
 
     args = [f"--want={k}={'on' if v else 'off'}" for k, v in wanted.items()]
+    # Windows 优先走计划任务：ZCode 的 Job 对象会在退出时把后代进程全部结束，
+    # 分离进程（DETACHED_PROCESS）也逃不掉；计划任务由 Task Scheduler 启动，不在 Job 里。
+    if os.name == "nt" and _start_watchdog_task(args):
+        log(f"已启动退出后看护（计划任务 {SCHTASK_NAME}）: {' '.join(args)}")
+        return
     kw = {"cwd": str(HERE), "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     if os.name == "nt":
         kw["creationflags"] = DETACHED_PROCESS | CREATE_NO_WINDOW

@@ -29,6 +29,8 @@ HERE = Path(__file__).resolve().parent
 LOG = HERE / "_apply_after_exit.log"
 PID_FILE = HERE / "_watchdog.pid"
 WANT_FILE = HERE / "_watchdog.want"
+# sync.py 在 Windows 用这个一次性计划任务启动看护（绕开 ZCode 的 Job 对象）
+SCHTASK_NAME = "ZCodePatchApply"
 POLL_SEC = 3
 MAX_WAIT_SEC = 24 * 3600
 PYTHON = sys.executable or "python"
@@ -230,6 +232,21 @@ def batch_tasks(tasks: list[tuple[list[str], bool]]) -> list[tuple[list[str], bo
     return batched
 
 
+def _delete_scheduled_task() -> None:
+    """清理一次性计划任务定义（sync.py 用它绕开 ZCode 的 Job 对象）。
+
+    删除定义不会终止已在运行的看护实例；sync 侧 /Run 后通常已经删过一次，
+    这里只是兜底（例如当时 /Delete 失败）。
+    """
+    if os.name != "nt":
+        return
+    try:
+        subprocess.run(["schtasks", "/Delete", "/TN", SCHTASK_NAME, "/F"],
+                       capture_output=True, timeout=20, **no_window_kwargs())
+    except Exception:
+        pass
+
+
 def _cleanup_singletons(cur_pid: int) -> None:
     try:
         if PID_FILE.is_file() and PID_FILE.read_text(encoding="utf-8").strip() == str(cur_pid):
@@ -237,6 +254,7 @@ def _cleanup_singletons(cur_pid: int) -> None:
         WANT_FILE.unlink(missing_ok=True)
     except Exception:
         pass
+    _delete_scheduled_task()
 
 
 def main() -> int:

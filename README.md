@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.32-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.33-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -151,6 +151,12 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.33（修复 ZCode 退出时看护被连带结束，导致升级后补丁永远不写入）
+- **根因**：Electron/Chromium 把子进程放进带 `KILL_ON_JOB_CLOSE` 的 Windows Job 对象；ZCode 退出时整棵进程树被结束，`DETACHED_PROCESS` 的退出看护也一起被杀。实测 `CREATE_BREAKAWAY_FROM_JOB` 会被 Job 拒绝（WinError 5），所以看护永远等不到「ZCode 已退出」，升级覆盖后的补丁也就一直不写入；
+- **修复**：Windows 上改用一次性计划任务（`schtasks`）启动看护——Task Scheduler 启动的进程不在 ZCode 的 Job 里，能活到退出之后；`/Run` 后立即 `/Delete` 任务定义（删除定义不会终止已运行实例），不留定时残留；计划任务创建失败时回退原分离进程；
+- **看护侧兜底**：`apply_after_exit.py` 退出清理时再次删除计划任务定义；命令写入短路径 `.cmd`，避开 `schtasks /TR` 的 262 字符限制；
+- **测试**：新增 `TestWatchdogScheduledTask`（Create→Run→Delete 序列、创建失败回退、计划任务优先、Job 根因注释），全量通过。
 
 #### 0.6.32（状态栏新增会话轮数/步数）
 - **会话累计新增「N轮N步」**：轮=当前会话已完成轮数（快照 `count(distinct turn_id)`），步=已完成模型请求数（`count(*)`，一次模型请求=一步，含工具调用链）；事件流按 `usage.delta.requestId` 去重实时累加，快照按 `Math.max` 补历史，重开旧会话/轮次滚出视口也能显示完整值；

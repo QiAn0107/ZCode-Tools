@@ -993,6 +993,23 @@ Python 侧 `tests/test_patcher.py::TestEnhancePromptScript`
 没有 `ZCode.exe` 残留；拿不准就完全退出后手动跑一次
 `python "<脚本目录>/zcode_patcher.py" --all`，不依赖看护时序。
 
+### ★★ ZCode 退出时看护被 Job 对象连带结束（0.6.33 修复）
+
+3.18.2 实测：用户**完全退出**后看护日志只有「看护启动…」，没有「ZCode 已退出」，
+`_watchdog.pid` 里的进程也已消失——看护不是没等到，是被**杀掉了**。
+
+根因：Electron/Chromium 把子进程放进带 `KILL_ON_JOB_CLOSE` 的 Windows Job 对象。
+ZCode 退出时 Job 关闭，整棵进程树（包括 `DETACHED_PROCESS` 启动的看护）一起结束；
+`CREATE_BREAKAWAY_FROM_JOB` 会被 Job 拒绝（实测 `WinError 5`），脱离不了。
+
+修复：Windows 改用一次性计划任务启动看护（`schtasks /Create → /Run → /Delete`）。
+Task Scheduler 启动的进程不在 ZCode 的 Job 里，能活到退出之后；删除任务定义
+不会终止已运行实例。创建失败时回退原来的分离进程。日志会写
+「已启动退出后看护（计划任务 ZCodePatchApply）」。
+
+判别：如果日志有「看护启动」但没有「ZCode 已退出」，且任务管理器里那个 PID
+已经不存在 → 就是被连带结束；0.6.33+ 应能看到计划任务启动记录。
+
 
 
 ### 连带修复：Windows 瞬时占用写不进补丁

@@ -1831,6 +1831,87 @@ class TestSyncModes(unittest.TestCase):
         self.assertEqual(buf.getvalue(), "")
 
 
+class TestWatchdogScheduledTask(unittest.TestCase):
+    """★ 回归：ZCode 退出时看护必须活着。
+
+    Electron/Chromium 会把子进程放进带 KILL_ON_JOB_CLOSE 的 Job 对象：
+    ZCode 一退出，整棵进程树（包括 DETACHED_PROCESS 的看护）被结束，
+    看护永远等不到「已退出」，补丁就永远写不进去（0.6.32 在 3.18.2 实测）。
+    CREATE_BREAKAWAY_FROM_JOB 会被 Job 拒绝（WinError 5），所以改由
+    Task Scheduler 启动一次性任务——它不在 ZCode 的 Job 里。
+    """
+
+    def setUp(self):
+        import sync
+        self.sync = sync
+        self._tmp = tempfile.TemporaryDirectory(prefix="zpatch-task-", ignore_cleanup_errors=True)
+        self._orig_cmd = sync.SCHTASK_CMD
+        sync.SCHTASK_CMD = Path(self._tmp.name) / "_watchdog_task.cmd"
+
+    def tearDown(self):
+        self.sync.SCHTASK_CMD = self._orig_cmd
+        self._tmp.cleanup()
+
+    def _fake_run(self, calls, fail_on=None):
+        class R:
+            def __init__(self, rc):
+                self.returncode = rc
+                self.stdout = ""
+                self.stderr = ""
+        def run(args, **kw):
+            calls.append(list(args))
+            return R(1 if (fail_on is not None and len(calls) == fail_on) else 0)
+        return run
+
+    def test_uses_schtasks_create_run_delete(self):
+        from unittest import mock
+        calls = []
+        with mock.patch.object(self.sync.subprocess, "run", self._fake_run(calls)):
+            ok = self.sync._start_watchdog_task(["--want=tps_footer=on"])
+        self.assertTrue(ok)
+        self.assertEqual(len(calls), 3, calls)
+        create, run, delete = calls
+        self.assertEqual(create[:4], ["schtasks", "/Create", "/TN", self.sync.SCHTASK_NAME])
+        self.assertIn("/SC", create)
+        self.assertIn("ONCE", create)
+        self.assertIn("/F", create)
+        # 命令写进短路径 .cmd，避开 /TR 的 262 字符限制
+        tr = create[create.index("/TR") + 1]
+        self.assertEqual(tr, f'"{self.sync.SCHTASK_CMD}"')
+        body = self.sync.SCHTASK_CMD.read_text(encoding="utf-8", errors="replace")
+        self.assertIn("apply_after_exit.py", body)
+        self.assertIn("--want=tps_footer=on", body)
+        self.assertIn("start", body)
+        self.assertIn("/wait", body)
+        self.assertEqual(run[:3], ["schtasks", "/Run", "/TN"])
+        self.assertEqual(run[3], self.sync.SCHTASK_NAME)
+        self.assertEqual(delete[:3], ["schtasks", "/Delete", "/TN"])
+        self.assertEqual(delete[3], self.sync.SCHTASK_NAME)
+
+    def test_create_failure_falls_back(self):
+        from unittest import mock
+        calls = []
+        with mock.patch.object(self.sync.subprocess, "run", self._fake_run(calls, fail_on=1)):
+            ok = self.sync._start_watchdog_task(["--want=tps_footer=on"])
+        self.assertFalse(ok)
+        self.assertEqual(len(calls), 1, "创建失败就不该再 Run/Delete")
+
+    def test_start_watchdog_prefers_task_before_popen(self):
+        import inspect
+        src = inspect.getsource(self.sync.start_watchdog)
+        self.assertIn("_start_watchdog_task(args)", src)
+        self.assertLess(src.index("_start_watchdog_task(args)"),
+                        src.index("subprocess.Popen"),
+                        "计划任务必须优先于分离进程，否则看护仍会被 Job 杀掉")
+
+    def test_task_launcher_documents_job_reason(self):
+        import inspect
+        src = inspect.getsource(self.sync._start_watchdog_task)
+        self.assertIn("KILL_ON_JOB_CLOSE", src)
+        self.assertIn("CREATE_BREAKAWAY_FROM_JOB", src)
+        self.assertIn("schtasks", src)
+
+
 class TestSyncStaleIsReinjected(unittest.TestCase):
     """★ 回归：「插件更新了，但补丁没跟着更新」这一类**静默失效**（0.6.1 修复）。
 
