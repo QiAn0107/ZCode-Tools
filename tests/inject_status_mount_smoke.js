@@ -176,7 +176,7 @@ function buildEnv({ pending = true, withBridge = true, navRow = true }) {
 
   let applyCalls = 0;
   const bridge = {
-    getInjectStatus: async () => ({ success: !0, pending, items: pending ? { tps_footer: true, model_puller: false } : {}, stamp: 1 }),
+    getInjectStatus: async () => ({ success: !0, pending, items: pending ? { tps_footer: true, model_puller: false } : {}, stamp: 1, ver: "0.6.44-smoke" }),
     applyPatchesNow: async () => { applyCalls++; return { success: !0 }; },
   };
 
@@ -228,6 +228,7 @@ async function main() {
   expect(!!btn, "A: pending=true 时角标应出现");
   expect(env.diag().bridge === true, "A: diag.bridge 应为 true");
   expect(env.diag().pending === true, "A: diag.pending 应为 true");
+  expect(env.diag().ver === "0.6.44-smoke", "A: diag.ver 应捕获注入侧版本");
   expect(env.diag().mountMode === "titlebar", "A: 应结构挂载到标题条，实际 " + env.diag().mountMode);
   expect(!!btn && btn.parentElement === env.row, "A: 角标应挂在导航按钮所在行内");
 

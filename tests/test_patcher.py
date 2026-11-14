@@ -1683,6 +1683,20 @@ class TestInjectStatusBlock(unittest.TestCase):
             finally:
                 Path(path).unlink(missing_ok=True)
 
+    def test_main_block_embeds_plugin_version(self):
+        """★ 0.6.44：生成内容烙入插件版本号（`ver:"0.6.44"`）。
+
+        用途：① 渲染层 `__zinjDiag.ver` 一眼可知客户端里跑的是哪版角标代码；
+        ② **每次发版生成内容必变** → check_state 必判 stale → 插件更新后角标必亮。
+        版本串不是本机路径，不违反副本字节一致性红线（同版本副本烙同一串）。"""
+        block = zp._inject_status_main_block("j").decode()
+        self.assertNotIn("__ZP_VER__", block, "占位符必须被替换干净")
+        self.assertIn('ver:"', zp._INJECT_STATUS_READ_HANDLER)
+        ver = zp._plugin_version()
+        self.assertRegex(ver, r"^\d+\.\d+\.\d+$",
+                         f"版本号应读自本副本插件清单: {ver!r}")
+        self.assertIn(f'ver:"{ver}"', block, "生成内容必须烙入当前副本的版本号")
+
     def test_blocks_coexist_with_others(self):
         """四块共用锚点互不干扰，摘除注入状态块不伤其它块。"""
         blob = (b'_.contextBridge.exposeInMainWorld("zcode",{'

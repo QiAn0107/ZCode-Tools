@@ -899,6 +899,30 @@ def _tps_snapshot_main_state(blob: bytes | None):
 
 # ------------------------------------------------------ 注入状态角标的注入块
 
+def _plugin_version() -> str:
+    """读本副本插件清单的版本号（烙进注入的 main handler）。
+
+    用途有二：① 渲染层 `__zinjDiag.ver` 一眼可知客户端里跑的是哪个版本的角标代码；
+    ② **每次发版生成内容必变** → check_state 必判 stale → 插件更新后角标必亮（同步
+    链路永远保持最新）。向上找最近的 `.zcode-plugin/plugin.json`（scripts 目录布局
+    兼容：插件式 `<root>/skills/zcode-tools/scripts` 与扁平 `<root>/scripts` 都能命中）。
+    找不到/读不动 → "unknown"。版本串不是本机路径，不违反副本字节一致性红线——
+    同版本副本烙入同一版本串，字节仍一致。"""
+    import json as _json
+    here = Path(__file__).resolve().parent
+    for cand in [here, *here.parents]:
+        mf = cand / ".zcode-plugin" / "plugin.json"
+        if mf.is_file():
+            try:
+                v = _json.loads(mf.read_text(encoding="utf-8")).get("version")
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            except Exception:
+                pass
+            break
+    return "unknown"
+
+
 # 只读 handler：读 sync.py / 看护双写的补丁状态文件。缺文件/损坏 → no-status
 # （渲染层隐藏角标），绝不 throw。
 # ★ stale 补触发（0.6.41）：SessionStart 只在「新会话第一轮」跑 sync——应用刚启动、
@@ -952,7 +976,7 @@ ch.unref();
 }catch(_){}}
 if(!st||typeof st!="object"||typeof st.pending!="boolean"){
 return{success:!1,code:"no-status",error:"补丁状态文件不存在或已损坏（等 SessionStart 钩子刷新）"}}
-return{success:!0,pending:st.pending,items:st.items||{},stamp:st.stamp,lastError:st.last_error||null}
+return{success:!0,pending:st.pending,items:st.items||{},stamp:st.stamp,lastError:st.last_error||null,ver:"__ZP_VER__"}
 }catch(err){return{success:!1,code:"read-failed",error:"读取补丁状态失败："+String(err&&err.message||err)}}});
 '''
 
@@ -1016,6 +1040,7 @@ def _inject_status_main_block(ipc_alias: str) -> bytes:
     →重排死循环（0.6.39 实测两代旧看护赛跑、0.6.39 同步永远判 stale）。生成内容
     与副本无关后，同一版本的任何副本注入结果完全一致。"""
     body = _INJECT_STATUS_READ_HANDLER.replace("__H__", ipc_alias)
+    body = body.replace("__ZP_VER__", _plugin_version())
     body += "\n" + _INJECT_STATUS_APPLY_HANDLER.replace("__H__", ipc_alias)
     return _wrap_block(INJECT_STATUS_BLOCK, body.encode())
 

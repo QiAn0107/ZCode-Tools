@@ -37,7 +37,8 @@
   };
 
   const diag = { bridge: false, pending: false, mountMode: null,
-                 lastPollAt: 0, lastError: null, noStatus: null, dialogOpen: false };
+                 lastPollAt: 0, lastError: null, noStatus: null, dialogOpen: false,
+                 ver: null };   // 注入侧代码版本（0.6.44：一眼可知客户端里跑的是哪版角标代码）
   window.__zinjDiag = diag;
   let lastStatus = null;
 
@@ -438,6 +439,7 @@
         diag.pending = r.pending === true;
         diag.noStatus = null;
         if (r.lastError) diag.lastError = r.lastError;
+        if (r.ver) diag.ver = r.ver;   // 注入侧代码版本（0.6.44）
       } else {
         lastStatus = null;
         diag.pending = false;

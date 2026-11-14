@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.43-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.44-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -150,6 +150,12 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.44（角标代码烙版本号：每次发版必判 stale → 插件更新即亮角标；`__zinjDiag.ver` 可查客户端注入侧版本）
+- **为什么需要**：0.6.43 修好了「更新后角标不亮」，但前提是**生成内容确实变了**——若某次发版没动注入组件，check_state 判「已一致」，角标不亮（语义上没错：没东西可注入），但用户无法确认修复链路是否已生效。0.6.44 起把插件版本号烙进注入的 main handler（`_plugin_version()` 向上找最近 `.zcode-plugin/plugin.json`，替换 `__ZP_VER__` 占位符）：**每次发版生成内容必变 → 必判 stale → 插件一更新完角标数秒内必亮**（0.6.43 的双源定位 + syncer_dir 漂移检测在客户端里生效后的第一个验证版本）；
+- **诊断增益**：IPC 返回体与 `__zinjDiag.ver` 暴露注入侧代码版本，一眼可知客户端里跑的是哪版角标代码，排查「行为不符」不再靠猜；
+- **副本一致性红线不受影响**：版本串不是本机路径——同版本副本烙同一串，字节仍一致；
+- **测试**：全量 366 项通过（新增版本烙入断言：占位符清零、版本读自本副本清单、生成内容含 `ver:"x.y.z"`；冒烟补 `diag.ver` 捕获断言）；JS 语法验证（node --check 生成块）继续钉住模板转义——本次就靠它拦住一处模板残留的多余 `}`。
 
 #### 0.6.43（修「插件更新后角标不亮、重开才亮」：sync 定位改双源 + 判定者漂移检测）
 - **根因（0.6.42 用户实测）**：0.6.41 的 stale 补触发按**指针文件**定位 sync.py —— 指针由上一次跑 sync 的副本写入，插件更新后仍指向**旧版本副本**；补触发跑的是旧副本的 sync，它判客户端匹配**旧副本**内容 →「已一致」→ 写回 `pending:false`，角标要等重开 ZCode 后新副本的 SessionStart 才亮；
