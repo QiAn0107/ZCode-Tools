@@ -8,11 +8,12 @@ description: 从备份精确还原 ZCode 客户端补丁
 python "<skill目录>/scripts/zcode_patcher.py" --tps-footer --revert
 python "<skill目录>/scripts/zcode_patcher.py" --enhance-prompt --revert
 python "<skill目录>/scripts/zcode_patcher.py" --model-puller --revert
+python "<skill目录>/scripts/zcode_patcher.py" --inject-status --revert
 ```
 
 要求：
 
-- 先确认 ZCode 已**完全退出**——重打包级补丁（TPS / 增强提示词 / 拉取按钮）还原会写 `app.asar`；
+- 先确认 ZCode 已**完全退出**——重打包级补丁（TPS / 增强提示词 / 拉取按钮 / 注入状态角标）还原会写 `app.asar`；
   脚本会预检进程，运行中直接拒绝（退出码 2）。
 - 还原按外科手术式进行，不依赖整包备份；多个补丁共存时互不误伤，可按需只还原其中一个。
 - 还原后提示用户重启 ZCode 确认已恢复原状。

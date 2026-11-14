@@ -88,6 +88,7 @@ ALL_PATCH_FLAGS = (
     "tps_footer",
     "model_puller",
     "enhance_prompt",
+    "inject_status",
 )
 
 
@@ -408,6 +409,17 @@ PULLER_MAIN_ANCHOR = re.compile(rb'(\w+)\.handle\(\w+\.SaveMcpToUserDirectory')
 ENHANCE_SCRIPT_PATH = "out/renderer/zcode-enhance-prompt.js"
 ENHANCE_TAG = f'<script type="module" src="./{ENHANCE_SCRIPT_PATH.split("/")[-1]}"></script>'
 ENHANCE_MARKER = b'zcode:enhance-prompt'
+
+# ---------------------------------------- 注入状态角标（asar 重打包级，--inject-status）
+# 渲染层「待注入」角标 + 确认弹窗 + 「退出并应用」IPC。补丁待写入状态由 sync.py
+# （SessionStart）与看护（apply_after_exit）双写进 <v2>/zcode-patches-status.json，
+# main 只读它；apply-now handler 复刻 sync._start_watchdog_task 的 schtasks 三连
+# （计划任务是唯一能逃出 ZCode Job 对象的启动方式，Popen/DETACHED 都活不过退出）。
+
+INJECT_STATUS_SCRIPT_PATH = "out/renderer/zcode-inject-status.js"
+INJECT_STATUS_TAG = f'<script type="module" src="./{INJECT_STATUS_SCRIPT_PATH.split("/")[-1]}"></script>'
+INJECT_STATUS_MARKER = b'zcode:inject-status'
+INJECT_STATUS_BLOCK = "zcode-inject-status"
 
 # 注入块名（标记定界用，见下方「注入块」小节）
 MODELS_BLOCK = "zcode-models"
@@ -833,6 +845,121 @@ def _tps_snapshot_main_state(blob: bytes | None):
     alias = a.group(1).decode()
     inj, synced, clean = _bridge_block_state(blob, TPS_SNAPSHOT_BLOCK,
                                              _tps_snapshot_main_block(alias))
+    return inj, synced, clean, alias
+
+
+# ------------------------------------------------------ 注入状态角标的注入块
+
+# 只读 handler：读 sync.py / 看护双写的补丁状态文件。缺文件/损坏 → no-status
+# （渲染层隐藏角标），绝不 throw。
+_INJECT_STATUS_READ_HANDLER = '''
+__H__.handle("zcode:inject-status",async(ev,t)=>{
+try{
+let{default:n}=await import("node:fs"),{default:r}=await import("node:path"),{default:i}=await import("node:os");
+let base=i.homedir();
+try{let s=JSON.parse(n.readFileSync(r.join(base,".zcode","v2","setting.json"),"utf-8"));
+if(s&&typeof s.dataBaseDir=="string"&&s.dataBaseDir.trim())base=s.dataBaseDir.trim()}catch(_){}
+let f=r.join(base,".zcode","v2","zcode-patches-status.json");
+let st=null;
+try{st=JSON.parse(n.readFileSync(f,"utf-8"))}catch(_){st=null}
+if(!st||typeof st!="object"||typeof st.pending!="boolean"){
+return{success:!1,code:"no-status",error:"补丁状态文件不存在或已损坏（等 SessionStart 钩子刷新）"}}
+return{success:!0,pending:st.pending,items:st.items||{},stamp:st.stamp,lastError:st.last_error||null}
+}catch(err){return{success:!1,code:"read-failed",error:"读取补丁状态失败："+String(err&&err.message||err)}}});
+'''
+
+# 「退出并应用」handler：确认弹窗后由渲染层调用。顺序即安全边界——
+#   ① 复核 pending（不 pending 拒绝退出）；② 重写看护启动 .cmd（正文与
+#   sync._start_watchdog_task 逐字一致，不带 --want → 看护合并 _watchdog.want）；
+#   ③ schtasks Create/Run（Task Scheduler 启动的进程不在 ZCode 的 Job 里，退出后
+#   才能活着注入；/Delete 只删定义不杀已启动实例）；任何一步失败都原样返回、
+#   绝不退出；④ 200ms 后 app.quit()（先让 IPC 响应回到渲染层），quit 被应用自身
+#   拦截时 5s 后 app.exit(0) 兜底强退。__WDIR__/__PY__/__WDOG__ 由 Python 在注入期
+#   烤入本插件 scripts 目录与解释器路径（看护用真解释器拉起 patcher，值即当下真实值）。
+_INJECT_STATUS_APPLY_HANDLER = r'''
+__H__.handle("zcode:apply-patches-now",async(ev,t)=>{
+try{
+let{default:n}=await import("node:fs"),{default:r}=await import("node:path"),{default:i}=await import("node:os"),{default:c}=await import("node:child_process"),{app:A}=await import("electron");
+let base=i.homedir();
+try{let s=JSON.parse(n.readFileSync(r.join(base,".zcode","v2","setting.json"),"utf-8"));
+if(s&&typeof s.dataBaseDir=="string"&&s.dataBaseDir.trim())base=s.dataBaseDir.trim()}catch(_){}
+let f=r.join(base,".zcode","v2","zcode-patches-status.json");
+let st=null;try{st=JSON.parse(n.readFileSync(f,"utf-8"))}catch(_){st=null}
+if(!st||st.pending!==!0)return{success:!1,code:"not-pending",error:"当前没有待写入的补丁"};
+let wdir=__WDIR__,py=__PY__,wdg=__WDOG__;
+try{n.mkdirSync(wdir,{recursive:!0})}catch(_){}
+let cmd="@echo off\r\nstart \"\" /wait \""+py+"\" \""+wdg+"\"\r\n";
+n.writeFileSync(r.join(wdir,"_watchdog_task.cmd"),cmd);
+let sk=(a)=>c.spawnSync("schtasks",a,{windowsHide:!0,timeout:15000});
+let cr=sk(["/Create","/TN","ZCodePatchApply","/TR",'\"'+r.join(wdir,"_watchdog_task.cmd")+'\"',"/SC","ONCE","/ST","23:59","/F"]);
+if(cr.status!==0)return{success:!1,code:"schedule-failed",error:"计划任务创建失败: "+String(cr.error&&cr.error.message||cr.stderr||cr.stdout||("exit "+cr.status)).slice(0,200)};
+let rn=sk(["/Run","/TN","ZCodePatchApply"]);
+if(rn.status!==0)return{success:!1,code:"run-failed",error:"计划任务启动失败: "+String(rn.error&&rn.error.message||rn.stderr||rn.stdout||("exit "+rn.status)).slice(0,200)};
+sk(["/Delete","/TN","ZCodePatchApply","/F"]);
+try{st.stamp=Date.now();n.writeFileSync(f,JSON.stringify(st))}catch(_){}
+setTimeout(()=>{try{A.quit()}catch(_){}},200);
+setTimeout(()=>{try{A.exit(0)}catch(_){}},5000);
+return{success:!0}
+}catch(err){return{success:!1,code:"error",error:String(err&&err.message||err)}}});
+'''
+
+
+def _watchdog_launch_paths() -> tuple[str, str, str]:
+    """(看护工作目录, 解释器, 看护脚本绝对路径)，供 apply-now handler 烤进 JS。
+
+    解释器取 patcher 自身运行所用的 sys.executable —— 看护正是用真解释器拉起本
+    脚本的，路径即当下真实值；GUI 子系统优先 pythonw.exe（计划任务不闪控制台，
+    与 sync._start_watchdog_task 的选择一致）。
+    """
+    exe = Path(sys.executable or "python")
+    pyw = exe.with_name("pythonw.exe")
+    if pyw.is_file():
+        exe = pyw
+    here = Path(__file__).resolve().parent
+    return str(here), str(exe), str(here / "apply_after_exit.py")
+
+
+def _inject_status_preload_block(electron_alias: str) -> bytes:
+    """暴露 2 个桥方法：getInjectStatus()（读状态）与 applyPatchesNow()（退出并应用）。"""
+    e = electron_alias
+    body = (f'getInjectStatus:()=>{e}.ipcRenderer.invoke("zcode:inject-status"),'
+            f'applyPatchesNow:()=>{e}.ipcRenderer.invoke("zcode:apply-patches-now"),').encode()
+    return _wrap_block(INJECT_STATUS_BLOCK, body)
+
+
+def _inject_status_main_block(ipc_alias: str) -> bytes:
+    wdir, py, wdg = _watchdog_launch_paths()
+    body = _INJECT_STATUS_READ_HANDLER.replace("__H__", ipc_alias)
+    body += "\n" + (_INJECT_STATUS_APPLY_HANDLER
+                    .replace("__H__", ipc_alias)
+                    .replace("__WDIR__", json.dumps(wdir))
+                    .replace("__PY__", json.dumps(py))
+                    .replace("__WDOG__", json.dumps(wdg)))
+    return _wrap_block(INJECT_STATUS_BLOCK, body.encode())
+
+
+def _inject_status_preload_state(blob: bytes | None):
+    """(injected, synced, clean, alias)。"""
+    if blob is None:
+        return False, False, None, None
+    a = PULLER_PRELOAD_ANCHOR.search(blob)
+    if a is None:
+        return False, False, None, None
+    alias = a.group(1).decode()
+    inj, synced, clean = _bridge_block_state(blob, INJECT_STATUS_BLOCK,
+                                             _inject_status_preload_block(alias))
+    return inj, synced, clean, alias
+
+
+def _inject_status_main_state(blob: bytes | None):
+    if blob is None:
+        return False, False, None, None
+    a = PULLER_MAIN_ANCHOR.search(blob)
+    if a is None:
+        return False, False, None, None
+    alias = a.group(1).decode()
+    inj, synced, clean = _bridge_block_state(blob, INJECT_STATUS_BLOCK,
+                                             _inject_status_main_block(alias))
     return inj, synced, clean, alias
 
 
@@ -1657,14 +1784,15 @@ def _cleanup_stale_tmp(folder: Path) -> None:
 
 
 def _refresh_repack_sidecars(asar: Path) -> None:
-    """asar 重打包后整文件尺寸变化：重打包级补丁（tps/puller/enhance）的 sidecar 只记
-    asar_size 指纹，必须跟着更新——否则后续 `--check` 会把 sidecar 报成「无」，
-    看着像记录丢了。"""
+    """asar 重打包后整文件尺寸变化：重打包级补丁（tps/puller/enhance/inject-status）的
+    sidecar 只记 asar_size 指纹，必须跟着更新——否则后续 `--check` 会把 sidecar
+    报成「无」，看着像记录丢了。"""
     try:
         cur_size = asar.stat().st_size
     except OSError:
         return
-    for suffix in (".tps-patch.json", ".puller-patch.json", ".enhance-patch.json"):
+    for suffix in (".tps-patch.json", ".puller-patch.json", ".enhance-patch.json",
+                   ".inject-status-patch.json"):
         side = asar.with_name(asar.name + suffix)
         if not side.is_file():
             continue
@@ -1886,6 +2014,20 @@ ENHANCE_SPEC = {
     "src_hint": "--enhance-src",
 }
 
+INJECT_STATUS_SPEC = {
+    "label": "注入状态角标",
+    "script_entry": INJECT_STATUS_SCRIPT_PATH,
+    "tag": INJECT_STATUS_TAG,
+    "src_name": INJECT_STATUS_SCRIPT_PATH.split("/")[-1],
+    "preload_block": _inject_status_preload_block,
+    "main_block": _inject_status_main_block,
+    "preload_state": _inject_status_preload_state,
+    "main_state": _inject_status_main_state,
+    "side_suffix": ".inject-status-patch.json",
+    "bak_suffix": ".inject-status.bak",
+    "src_hint": "--inject-status-src",
+}
+
 
 def _process_ipc_patch(asar: Path, check_only: bool, revert: bool, src_path: Path | None,
                        spec: dict, *, dry_run: bool = False, version: str | None = None) -> bool:
@@ -2081,6 +2223,13 @@ def process_enhance_prompt(asar: Path, check_only: bool, revert: bool, enhance_s
                               dry_run=dry_run, version=version)
 
 
+def process_inject_status(asar: Path, check_only: bool, revert: bool, status_src: Path | None, *,
+                          dry_run: bool = False, version: str | None = None) -> bool:
+    """注入状态角标（主窗口左上角「待注入」黑底金字角标，点击确认后退出并应用补丁）。"""
+    return _process_ipc_patch(asar, check_only, revert, status_src, INJECT_STATUS_SPEC,
+                              dry_run=dry_run, version=version)
+
+
 def _v2_root(override: str | None = None) -> Path:
     """配置根目录 <dataBaseDir>/.zcode/v2（dataBaseDir 取自 ~/.zcode/v2/setting.json，
     与客户端 bootstrap 同逻辑）。"""
@@ -2244,7 +2393,7 @@ def main() -> int:
     safe_stdio()          # 输出被重定向时 cp936 会编不出 ✓/✗，先把这条路封死
     ap = argparse.ArgumentParser(
         description="ZCode 客户端补丁工具：TPS 统计栏 + 模型拉取按钮 "
-                    "+ 增强提示词按钮（自动探测安装位置）")
+                    "+ 增强提示词按钮 + 注入状态角标（自动探测安装位置）")
     ap.add_argument("target", nargs="?", help="可选：安装根目录或 zcode.cjs 路径；缺省自动探测全部")
     mode_g = ap.add_mutually_exclusive_group()
     mode_g.add_argument("--check", action="store_true", help="只检查状态，不修改")
@@ -2269,6 +2418,10 @@ def main() -> int:
                     help="注入「增强提示词」按钮：输入框旁一键用当前选中的模型润色草稿，asar 重打包级")
     ap.add_argument("--enhance-src", default=None,
                     help="指定注入的 zcode-enhance-prompt.js 路径（默认用本脚本同目录自带的）")
+    ap.add_argument("--inject-status", action="store_true",
+                    help="注入注入状态角标：主窗口左上角「待注入」黑底金字角标（补丁待写入时出现，点击确认后退出并应用），asar 重打包级")
+    ap.add_argument("--inject-status-src", default=None,
+                    help="指定注入的 zcode-inject-status.js 路径（默认用本脚本同目录自带的）")
     ap.add_argument("--prune", action="store_true",
                     help="清理安装目录里的补丁产物（旧版本归档 / 临时文件残留）")
     ap.add_argument("--deep", action="store_true",
@@ -2297,7 +2450,7 @@ def main() -> int:
             return 1
         return 0
 
-    asar_flags = any((args.tps_footer, args.model_puller, args.enhance_prompt))
+    asar_flags = any((args.tps_footer, args.model_puller, args.enhance_prompt, args.inject_status))
     if not asar_flags:
         ap.print_help()
         return 0
@@ -2350,6 +2503,10 @@ def main() -> int:
          lambda a: process_enhance_prompt(a, args.check, args.revert,
                                           Path(args.enhance_src) if args.enhance_src else None,
                                           dry_run=args.dry_run, version=version)),
+        (args.inject_status, "注入状态角标注入",
+         lambda a: process_inject_status(a, args.check, args.revert,
+                                         Path(args.inject_status_src) if args.inject_status_src else None,
+                                         dry_run=args.dry_run, version=version)),
     ]
     for enabled, title, fn in steps:
         if not enabled:

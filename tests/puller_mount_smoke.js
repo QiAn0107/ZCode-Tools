@@ -218,6 +218,9 @@ if (btn) {
   expect(btn.getAttribute("title") === "根据当前 Base URL 和 API Key 自动拉取所有可用模型",
     "tooltip 应保留功能说明，实际：" + btn.getAttribute("title"));
   expect(btn.getAttribute("aria-label") === "自动拉取模型", "应设置 aria-label（纯图标按钮的唯一文字语义）");
+  // 原生行容器是 space-between，DOM 相邻≠视觉相邻：margin-left:auto 让
+  // 「图标+添加模型」成对贴右，图标不会摊到行中间
+  expect(btn.style.marginLeft === "auto", "应有 margin-left:auto（space-between 容器下贴住添加模型）");
   expect(head.children.some((c) => c.id === "zcode-model-puller-style-pro"),
     "样式表应注入 document.head");
 }

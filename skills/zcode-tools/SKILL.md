@@ -83,6 +83,7 @@ python "<skill目录>/scripts/doctor.py" --where  # 只查「插件装在哪」+
 | TPS 状态栏 | `--tps-footer` | 开 | ZCode 退出时自动应用，**再启动**才生效（两次启停） |
 | 设置页模型拉取按钮 | `--model-puller` | 开 | ZCode 退出时自动应用，**再启动**才生效（两次启停） |
 | 增强提示词按钮 | `--enhance-prompt` | 开 | ZCode 退出时自动应用，**再启动**才生效（两次启停） |
+| 注入状态角标 | `--inject-status` | 开 | ZCode 退出时自动应用，**再启动**才生效（两次启停） |
 
 行为约定（`scripts/sync.py`，由 SessionStart hook 调用）：
 
@@ -209,6 +210,7 @@ python "<skill目录>/scripts/zcode_patcher.py" --model-puller
 | 打开状态栏 | 输入框下方居中统计条（**v2 纯 DOM 观测，3.12.2+ 安全**；右键可切工具栏/会话顶部 sticky）：即时指标（首 token/tok/s）+ 会话累计（N轮N步、输入/输出/平均命中率）+ 今日总耗 | `python zcode_patcher.py --tps-footer [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
 | 模型拉取按钮 | 设置页一键拉取/勾选模型 | `python zcode_patcher.py --model-puller [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
 | **增强提示词** | 输入框旁一键润色草稿（可恢复原文）；**右键**弹出菜单选择使用哪个模型 | `python zcode_patcher.py --enhance-prompt [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
+| **注入状态角标** | 主窗口左上角黑底金字「待注入」角标（补丁待写入时出现），点击弹确认窗 → 退出 ZCode → 看护注入 → 自动重启 | `python zcode_patcher.py --inject-status [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
 
 两个及以上功能可一次执行：`python zcode_patcher.py --tps-footer --model-puller`。
 全部功能一条命令：`python zcode_patcher.py --all [--check/--revert]`（等价于写全上表所有补丁参数）。
@@ -439,6 +441,11 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 6. Python 侧 `tps_snapshot.py` 只读 `~/.zcode/cli/db/db.sqlite`（`mode=ro`），按 `session_id` 聚合 `model_usage`（`status='completed'`）+ 今日全局，写 `~/.zcode/v2/ztps-snapshot.json`；每会话同时带 `turns`（只数含 `main_turn` 行的 turn_id，0.6.37 起，见轮/步口径）与 `requests`（completed 行数=模型请求数），供状态栏 `N轮N步` 使用。触发点：SessionStart worker、**每轮结束的 `Stop` 钩子**（0.6.27，DB 只有轮末落库，只靠 SessionStart 会把今日总耗冻在会话开始那一刻）、**回合内每次工具调用的 `PostToolUse` 钩子**（0.6.35，带 `--min-age 30` 节流：快照 30s 内刷新过就秒退不碰 DB。修的是「长回合中途总耗冻在回合初值」——用户实测官方用量页 15.9M、状态栏 9m，轮末快照一写才跳到 20m）、看护写补丁前。无新增常驻进程。口径移植自 `xhwxt/zcode-token-usage-statusbar` (MIT)：合计=`computed_total`（=input+output，cache 已含 input 不重复加），命中=`cache_read/input`。钩子调用必须带 `--quiet`，否则 stdout 非 JSON 会被判钩子失败。
 7. 渲染层经 `zcode:tps-snapshot` IPC（preload 桥 + main 只读 handler，与 enhance bridge 同锚点模式）取快照，3s TTL 缓存，**轮次结束强制失效**（`_snapCache.at = 0`）即时取本轮结算值；以 `Math.max(事件累计, 快照值)` 回填会话输入/输出/命中、轮数/步数（0.6.36 起纯 `max`，快照 `turns/requests` 不再加流式中轮次补差——见轮/步口径）与今日总耗——事件优先、快照补漏，流式值不会被拉低。快照缺失/损坏/无桥时静默降级为纯事件流（`__ztpsDiag.snapshotHit/snapshotOk/snapshotErr/snapshotTs/snapshotToday/snapshotAge/aggRounds/aggSteps/snapTurns/snapRequests` 可查）。
 8. **handler 参数陷阱**（0.6.27 修复）：`ipcMain.handle(ch, (event, ...args))` 的第二参数是**渲染层实参**，不是模块。0.6.26 写成 `async(ev,t)=>{...t.join(...)}` 而 preload 不传参 → `t===undefined` → 每次 invoke 抛 TypeError → 永远 `read-failed`，快照整条链路静默失效（表现为输入/命中不显示、今日总耗只吃 localStorage 存量）。路径模块必须用 `import` 进来的 `r`。
+
+**注入状态角标链路**（0.6.38，`--inject-status`）：
+
+9. 状态真相源 = `<base>/.zcode/v2/zcode-patches-status.json`（base 服从 dataBaseDir）：**sync.py `run_sync()` 收尾写**（有分歧 → `pending:true` + items；全一致 → `false`），**看护 `apply_after_exit._write_status` 应用后回写**（成功 → `false`；失败/预检未通过 → 保持 `true` + `last_error`）——双写保证任一环失败角标也不说谎。渲染层 `zcode-inject-status.js` 10s 轮询 `zcode:inject-status` IPC（main 只读 handler，缺文件回 `no-status` → 隐藏角标），pending 时在左上标题条（返回/前进按钮所在行）挂黑底金字「待注入」角标，找不到锚点退化为固定位置兜底（`__zinjDiag.mountMode` 可查实况）。
+10. 一键应用链路：点角标 → 原生风格确认弹窗（说明将**完全退出 ZCode**、未发送草稿会中断，Esc/取消/遮罩均可关闭）→ 确认调 `zcode:apply-patches-now`（main handler）→ 复核 pending → 重写看护启动 `_watchdog_task.cmd`（正文与 `sync._start_watchdog_task` 逐字一致、不带 `--want` → 看护合并 `_watchdog.want`）→ `schtasks /Create + /Run ZCodePatchApply`（计划任务是**唯一**能逃出 ZCode Job 对象的启动方式，Popen/DETACHED 都活不过退出）→ 200ms 后 `app.quit()`（quit 被应用自身拦截时 5s 后 `app.exit(0)` 强退兜底）→ 看护等退出、写补丁、拉起 ZCode。任何一步失败都原样返回 `{success:!1}` **不退出**，渲染层 toast 提示；看护脚本/解释器路径由 Python 在注入期烤进 handler 字面量（渲染层无法自行定位插件目录）。
 
 ### 注入原理（asar 重打包级）
 

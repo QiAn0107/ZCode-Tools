@@ -66,6 +66,7 @@ PATCHES = [
     ("tps_footer", ["--tps-footer"], True),
     ("enhance_prompt", ["--enhance-prompt"], True),
     ("model_puller", ["--model-puller"], True),
+    ("inject_status", ["--inject-status"], True),
 ]
 
 DETACHED_PROCESS = 0x00000008
@@ -459,6 +460,41 @@ def start_watchdog(wanted: dict) -> None:
     log(f"已启动退出后看护: {' '.join(args)}")
 
 
+def write_patch_status(deferred: dict) -> None:
+    """把「补丁是否待写入」写进 v2 状态文件（渲染层「待注入」角标的真相源）。
+
+    路径 <base>/.zcode/v2/zcode-patches-status.json（base 服从 dataBaseDir，与
+    ztps-snapshot 同一惯用法）。pending:true 时角标出现，用户可一键「退出并应用」；
+    看护应用成功后也会写 pending:false 双保险。失败只记日志：渲染层读不到文件时
+    静默隐藏角标，绝不能因为角标把同步主流程搞挂。
+    """
+    import json as _json
+    import os as _os
+    import tempfile as _tempfile
+    import time as _time
+    try:
+        sys.path.insert(0, str(HERE))
+        import tps_snapshot
+        dest = tps_snapshot.resolve_v2_root() / "zcode-patches-status.json"
+        data = {"v": 1, "stamp": int(_time.time() * 1000),
+                "pending": bool(deferred), "items": dict(deferred)}
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = _tempfile.mkstemp(dir=str(dest.parent),
+                                    prefix=".zpatch-status-", suffix=".tmp")
+        try:
+            with _os.fdopen(fd, "w", encoding="utf-8") as f:
+                _json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+            _os.replace(tmp, dest)
+        except BaseException:
+            try:
+                _os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except Exception as e:
+        log(f"补丁状态文件写入失败（渲染层角标降级隐藏）: {e!r}")
+
+
 def resolve_wanted() -> tuple[dict, str]:
     """算出这次要同步成什么样，返回 (期望状态, 来源说明)。
 
@@ -552,6 +588,11 @@ def run_sync(echo: bool = False) -> str:
 
     if deferred:
         start_watchdog(deferred)
+
+    # 补丁状态文件：渲染层「待注入」角标的真相源（0.6.38）。有分歧 → pending:true，
+    # 角标出现、可一键「退出并应用」；全一致 → pending:false。应用成功后由看护
+    # （apply_after_exit._write_status）清零，双写保证任一环失败角标也不会说谎。
+    write_patch_status(deferred)
 
     # TPS 快照刷新（最佳努力）：让用量快照在每次会话启动时更新一次。
     # 渲染层经 zcode:tps-snapshot IPC 读快照做"结算层"回填；刷新失败静默，
@@ -680,7 +721,7 @@ def build_notice(is_upgrade: bool = False, version: str = "") -> str:
         )
     return (
         f"{NOTICE_HEAD}。本次会话启动时已在后台开始同步：\n"
-        "· 三项增强补丁（TPS 状态栏、增强提示词、模型拉取按钮）都要等你**完全退出 ZCode**"
+        "· 四项增强补丁（TPS 状态栏、增强提示词、模型拉取按钮、注入状态角标）都要等你**完全退出 ZCode**"
         "（托盘图标右键 → 退出）时才会写入 ——\n"
         "  客户端运行期间会拒绝改写 app.asar 与 provider_config.json；退出后由看护写入，"
         "并自动把 ZCode 重新拉起来，再启动即可见。\n"

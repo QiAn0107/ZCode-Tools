@@ -836,7 +836,7 @@ def step_deploy(log: Logger, dry_run: bool, *, unattended: bool,
         # 看护的 --want 参数与 sync.py 保持同一套键名
         wants = [
             "--want=tps_footer=on", "--want=enhance_prompt=on",
-            "--want=model_puller=on",
+            "--want=model_puller=on", "--want=inject_status=on",
         ]
         flags = 0x00000008 | 0x08000000 if os.name == "nt" else 0   # DETACHED|NO_WINDOW
         try:

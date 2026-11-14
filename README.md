@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.37-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.38-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -45,6 +45,7 @@
 | 🛡️ | **升级自动自愈** | 动态监控客户端与插件版本，升级后自动感知并调度看护静默修复 | 状态监控器 |
 | 📊 | **实时 TPS 状态栏** | 输入框常驻：即时指标（首 token / tok/s）+ 会话累计（N轮N步 / 输入 / 输出 / 平均命中）+ 今日总耗，右键自由切换位置 | `app.asar` 注入脚本 |
 | ✨ | **提示词增强润色** | 输入框旁「增强提示词」按钮，右键支持按供应商自选润色模型，持久化且免重启 | `app.asar` 注入脚本 + IPC |
+| 🏷️ | **注入状态角标** | 左上角黑底金字「待注入」角标（补丁待写入时出现），点击确认后自动退出 → 看护注入 → 自动重启 | `app.asar` 注入脚本 + IPC |
 | ⚡ | **设置页模型拉取** | 设置页「添加模型」左侧的下载图标按钮，点开弹窗自动同步供应商可用模型并批量写入 | `app.asar` 注入脚本 + IPC |
 
 ---
@@ -149,6 +150,15 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.38（新增注入状态角标：补丁待写入时出现，点击确认后自动退出→看护注入→自动重启）
+- **新功能（第 4 项重打包级补丁 `--inject-status`，默认开）**：主窗口左上角标题条挂黑底金字「待注入」24px 角标（`#141414` 底 + `#E8B339` 金字金边），仅在补丁待写入时出现；点击弹原生风格确认弹窗（说明将**完全退出 ZCode**、未发送草稿会中断，列出待写入项；✕/取消/Esc/点遮罩均可关闭），确认后：main handler 复核 pending → 重写看护启动 `_watchdog_task.cmd` → `schtasks /Create+/Run ZCodePatchApply`（计划任务是唯一能逃出 ZCode Job 对象的启动方式）→ 200ms 后 `app.quit()`（被拦时 5s `app.exit(0)` 强退兜底）→ 看护等退出、写补丁、自动拉起，角标随 `pending:false` 消失；
+- **状态真相源双写**：`<v2>/zcode-patches-status.json` 由 sync.py（SessionStart，按同步分歧写）与看护（应用后回写，失败保持 pending + 原因）双写，任一环失败角标也不会说谎；渲染层 10s 轮询只读 IPC，缺文件/无桥静默降级隐藏，绝不打扰；
+- **挂载兜底**：优先结构挂载到标题条返回/前进按钮所在行，找不到锚点退化为固定位置（两者都带 `-webkit-app-region:no-drag`——标题条是拖拽区，不加就点不动）；`__zinjDiag.mountMode` 可查实况；
+- **异常兜底**：pending 复核失败 / schtasks Create/Run 任一失败 → 原样返回**绝不退出**（假成功比不成功更危险），渲染层 toast 说明原因；
+- **顺手拆弹**：`apply_after_exit.parse_wants` 对 `_watchdog.want` 历史残留键（0.6.34 移除的 usage_chart，merge 只增不删会永远留着）直接 KeyError——看护无人值守崩溃且无声（本机日志实测三连崩），整条退出→注入→拉起链路随之断裂；现跳过未知键并留痕；
+- **拉取按钮贴右**：原生「模型列表」行容器是 space-between，图标按钮虽 DOM 紧贴添加模型却被摊到行中间——加 `margin-left:auto` 吃掉左侧富余空间，让「图标 + 添加模型」成对贴右（窄窗换行/两子元素/flex-start 等布局下同样成立）；
+- **测试**：全量 341 项通过；新增 `TestInjectStatusBlock`（安全白名单：read handler 纯只读禁写禁网；apply handler 禁网、失败路径绝不 quit；路径烤入断言）、`TestPatchStatusFile`（双写）、`TestParseWantsUnknownKeys`（拆弹回归）、`TestInjectStatusSmoke` 接线 `tests/inject_status_mount_smoke.js`（六场景：标题条挂载/固定兜底/三种关弹窗/确认调用链/失败兜底/无桥降级）；全链路注册 16 处（ALL_PATCH_FLAGS / sync.PATCHES / doctor / 看护 / plugin.json / autopilot / commands 四表）。
 
 #### 0.6.37（修压缩续接轮虚增轮数：可见 8 轮显示 9轮；拉取按钮改下载图标并移至「添加模型」左侧）
 - **轮数虚增根因**：上下文压缩会把一个可见轮拆成两个 turn_id——压缩时上下文耗尽，续接段是新 turn_id 且整段 `query_source='compact'`、parent 为 NULL，转录里**没有新轮块**（用户看不见），但快照按 `count(distinct turn_id)` 计轮把它 +1——用户实测可见 8 轮显示 9轮。事件层按 DOM 可见 section 计数本来就是对的，幽灵轮全来自快照层；

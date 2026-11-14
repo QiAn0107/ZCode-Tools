@@ -1034,6 +1034,11 @@
     pullBtn.type = "button";
     pullBtn.setAttribute("title", PULL_BTN_TITLE_IDLE);
     pullBtn.setAttribute("aria-label", "自动拉取模型");
+    // 原生行容器多为 space-between：DOM 上虽紧贴添加模型，三个子元素会被均摊成
+    // 「模型列表 … 图标 … 添加模型」（图标落中间，用户实测）。margin-left:auto
+    // 吃掉左侧全部富余空间，让「图标 + 添加模型」成对贴右；2 子元素、flex-start
+    // 等其它布局下同样成立。
+    pullBtn.style.marginLeft = "auto";
 
     pullBtn.innerHTML = PULL_BTN_IDLE_HTML;
 

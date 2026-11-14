@@ -14,6 +14,7 @@ python "<skill目录>/scripts/zcode_patcher.py" --all --check
 python "<skill目录>/scripts/zcode_patcher.py" --tps-footer --check
 python "<skill目录>/scripts/zcode_patcher.py" --enhance-prompt --check
 python "<skill目录>/scripts/zcode_patcher.py" --model-puller --check
+python "<skill目录>/scripts/zcode_patcher.py" --inject-status --check
 ```
 
 要求：

@@ -5,7 +5,7 @@
 → 重启 ZCode → 记录日志后退出。日志: scripts/_apply_after_exit.log
 
 两种调用方式：
-  1) 无参数（本地计划任务）：应用 档位配置 + TPS 状态栏 + 滑条 + 拉取按钮（见 DEFAULT_TASKS）
+  1) 无参数（本地计划任务）：应用全部 4 项补丁（TPS 状态栏 / 增强提示词 / 模型拉取按钮 / 注入状态角标，见 DEFAULT_TASKS）
   2) `--want=<键>=on|off`（插件 sync.py 传入，可多个）：只处理指定开关，off 走 --revert
 
 取消方式: schtasks /Delete /TN ZCodePatchApply /F（并删除本脚本）
@@ -134,12 +134,14 @@ PATCH_ARGS = {
     "tps_footer": ["--tps-footer"],
     "enhance_prompt": ["--enhance-prompt"],
     "model_puller": ["--model-puller"],
+    "inject_status": ["--inject-status"],
 }
-# 未收到 --want 时的默认动作（本地计划任务用）：全量 3 项补丁按序全部应用
+# 未收到 --want 时的默认动作（本地计划任务用）：全量 4 项补丁按序全部应用
 DEFAULT_TASKS = [
     ["--tps-footer"],
     ["--enhance-prompt"],
     ["--model-puller"],
+    ["--inject-status"],
 ]
 
 
@@ -194,6 +196,13 @@ def parse_wants(argv: list[str]):
         return None
     tasks = []
     for key, enabled in merged_wants.items():
+        if key not in PATCH_ARGS:
+            # ★ 回归（0.6.38）：WANT_FILE 由「合并旧文件 + 更新新值」维护（sync.py
+            #   start_watchdog 只 update 不删键），历史残留键（如 0.6.34 移除的
+            #   usage_chart）会永远留在里面 —— 直接 PATCH_ARGS[key] 是 KeyError，
+            #   看护在等待前就崩溃且无人值守无声（实测日志尾部三连崩）。跳过并留痕。
+            log(f"WANT_FILE 含未知补丁键 {key!r}（可能来自旧版本），已跳过")
+            continue
         tasks.append((PATCH_ARGS[key], not enabled))
     return tasks
 
@@ -255,6 +264,39 @@ def _cleanup_singletons(cur_pid: int) -> None:
     _delete_scheduled_task()
 
 
+def _write_status(pending: bool, last_error: str | None = None) -> None:
+    """把补丁 pending 状态写进 v2 状态文件（渲染层「待注入」角标的真相源）。
+
+    应用成功 → pending:false（重启后角标消失）；失败/预检未通过 → 保持
+    pending:true + last_error。与 sync.write_patch_status 双写：任一环失败，
+    角标也不会谎报。写失败只记日志，绝不影响看护主流程。
+    """
+    import json
+    import tempfile
+    try:
+        dest = _import_patcher()._v2_root() / "zcode-patches-status.json"
+        data = {"v": 1, "stamp": int(time.time() * 1000),
+                "pending": bool(pending), "items": {}}
+        if pending and last_error:
+            data["last_error"] = last_error
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(dest.parent),
+                                   prefix=".zpatch-status-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+            os.replace(tmp, dest)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        log(f"补丁状态已更新: pending={pending}" + (f"（{last_error}）" if last_error else ""))
+    except Exception as e:
+        log(f"补丁状态文件写入失败（角标维持现状）: {e!r}")
+
+
 def main() -> int:
     import os
     cur_pid = os.getpid()
@@ -277,6 +319,7 @@ def main() -> int:
     early_tasks = parse_wants(sys.argv[1:])
     if early_tasks is not None and not early_tasks:
         log("没有待应用的补丁任务，看护退出，不进行等待与重启")
+        _write_status(False)
         _cleanup_singletons(cur_pid)
         return 0
 
@@ -287,6 +330,7 @@ def main() -> int:
         waited += POLL_SEC
         if waited >= MAX_WAIT_SEC:
             log("等待超时（24h），放弃")
+            _write_status(True, "等待超时（24h），补丁仍未写入")
             _cleanup_singletons(cur_pid)
             return 1
 
@@ -295,6 +339,7 @@ def main() -> int:
         raw_tasks = [(args, False) for args in DEFAULT_TASKS]
     if not raw_tasks:
         log("ZCode 已退出，但检查后无有效补丁任务需要执行，看护完成，不重启 ZCode")
+        _write_status(False)
         _cleanup_singletons(cur_pid)
         return 0
     desc = "、".join(("还原 " if rev else "应用 ") + (" ".join(a) or "内核补丁") for a, rev in raw_tasks)
@@ -325,10 +370,16 @@ def main() -> int:
         log(f"$ zcode_patcher.py {' '.join(cmd[2:])}  [exit={r.returncode}]\n{out}".rstrip())
         if r.returncode == 2:
             log("预检未通过（ZCode 在等待期间被重新拉起），本次放弃，不重启")
+            _write_status(True, "预检未通过（ZCode 在等待期间被重新拉起）")
             _cleanup_singletons(cur_pid)
             return 1
         if r.returncode != 0:
             failed += 1
+
+    # 应用结果回写状态文件：全成功 → pending:false（角标消失）；有失败 → 保持
+    # pending:true + 原因（下次 SessionStart 的 sync 会重新评估并覆盖）
+    _write_status(failed == 0,
+                  None if failed == 0 else f"{failed} 项补丁应用失败（详见日志）")
 
     res, exe = resolve_install()
     _cleanup_singletons(cur_pid)

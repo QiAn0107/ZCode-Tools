@@ -61,11 +61,12 @@ PATCH_KEYS = [
     ("tps_footer", "TPS 状态栏"),
     ("enhance_prompt", "增强提示词"),
     ("model_puller", "模型拉取按钮"),
+    ("inject_status", "注入状态角标"),
 ]
 # 「重打包级」= 要改写整个 app.asar（当前全部补丁都是重打包级）。
 # 注意：zcode_patcher.py 只要发现 ZCode.exe 在跑就一律拒绝写入，
 # 所以都得等退出后由看护写。这个集合只用来区分「改的东西有多重」，不再代表「要不要重启」。
-REPACK_KEYS = {"tps_footer", "enhance_prompt", "model_puller"}
+REPACK_KEYS = {"tps_footer", "enhance_prompt", "model_puller", "inject_status"}
 
 OK, WARN, BAD, INFO = "  [√]", "  [!]", "  [×]", "  [i]"
 

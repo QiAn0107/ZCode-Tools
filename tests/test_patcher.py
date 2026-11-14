@@ -1388,6 +1388,266 @@ class TestTpsSnapshotBlock(unittest.TestCase):
         self.assertIn("TPS_SNAPSHOT_SPEC", src)
 
 
+class TestInjectStatusBlock(unittest.TestCase):
+    """注入状态角标 IPC 块（0.6.38）：只读状态 handler + 「退出并应用」handler。
+
+    安全边界：read handler 纯 fs.readFileSync（缺文件回 no-status，绝不 throw）；
+    apply handler 允许写看护 .cmd 与 child_process（schtasks 是唯一能逃出 ZCode
+    Job 对象的启动方式，Popen/DETACHED 都活不过退出），但绝不联网；pending 复核
+    失败或 schtasks Create/Run 任一失败都原样返回、**绝不调用 app.quit**——
+    假成功比不成功更危险（用户以为会注入，结果什么都没发生）。"""
+
+    def test_preload_exposes_two_bridges(self):
+        code = zp._inject_status_preload_block("_").decode()
+        self.assertIn("getInjectStatus", code)
+        self.assertIn("applyPatchesNow", code)
+        self.assertIn("zcode:inject-status", code)
+        self.assertIn("zcode:apply-patches-now", code)
+        self.assertIn(zp.INJECT_STATUS_BLOCK, code, "块必须有标记定界")
+
+    def test_read_handler_is_readonly_file_bridge(self):
+        code = zp._INJECT_STATUS_READ_HANDLER
+        self.assertIn('handle("zcode:inject-status"', code)
+        self.assertIn("readFileSync", code)
+        self.assertIn("zcode-patches-status.json", code)
+        self.assertIn("no-status", code, "缺文件/损坏必须回可识别失败码，渲染层据此隐藏角标")
+        self.assertIn("success:!1", code)
+        for banned in ("sqlite", "writeFileSync", "spawn", "execFile", "execSync",
+                       "fetch(", "https", "httpMod", "XMLHttpRequest", "child_process"):
+            self.assertNotIn(banned, code, f"状态 handler 不得包含 {banned}")
+
+    def test_apply_handler_schedules_watchdog_then_quits(self):
+        code = zp._INJECT_STATUS_APPLY_HANDLER
+        self.assertIn('handle("zcode:apply-patches-now"', code)
+        self.assertIn("node:child_process", code)
+        self.assertIn("schtasks", code)
+        self.assertIn("ZCodePatchApply", code)
+        self.assertIn("_watchdog_task.cmd", code)
+        self.assertIn("writeFileSync", code, "要重写看护启动 .cmd（绕 /TR 262 字符限制）")
+        self.assertIn("A.quit()", code)
+        self.assertIn("A.exit(0)", code, "quit 被应用自身拦截时必须有 5s 强退兜底")
+        # 失败路径全部原样返回、绝不退出
+        self.assertIn("not-pending", code)
+        self.assertIn("schedule-failed", code)
+        self.assertIn("run-failed", code)
+        self.assertIn("success:!1", code)
+        for banned in ("sqlite", "fetch(", "httpsMod", "XMLHttpRequest"):
+            self.assertNotIn(banned, code, f"apply handler 不得联网: {banned}")
+
+    def test_apply_handler_paths_are_baked(self):
+        """看护脚本/解释器路径必须在注入期由 Python 烤成字面量（渲染层无法自行定位
+        插件 scripts 目录；占位符残留 = 运行时写错位置）。"""
+        code = zp._inject_status_main_block("j").decode()
+        self.assertNotIn("__WDIR__", code)
+        self.assertNotIn("__PY__", code)
+        self.assertNotIn("__WDOG__", code)
+        self.assertIn("apply_after_exit.py", code)
+        # GUI 子系统优先 pythonw.exe（计划任务不闪控制台）；本机没有 pythonw 时
+        # 退回 python.exe 也合法，故仅在存在时断言
+        pyw = Path(sys.executable).with_name("pythonw.exe")
+        if pyw.is_file():
+            self.assertIn("pythonw", code)
+
+    def test_handler_does_not_use_ipc_arguments(self):
+        """回归：handler 第二参数是渲染层实参，不是 path 模块（0.6.26 的坑）。"""
+        for code in (zp._INJECT_STATUS_READ_HANDLER, zp._INJECT_STATUS_APPLY_HANDLER):
+            self.assertNotIn("t.join(", code,
+                             "handler 不得拿 ipc 实参当 path 模块用（会永远是 undefined）")
+        self.assertIn('r.join(base,".zcode","v2","zcode-patches-status.json")',
+                      zp._INJECT_STATUS_READ_HANDLER)
+
+    def test_main_injection_is_valid_js(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("no node")
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                         encoding="utf-8") as f:
+            f.write("const j={handle:()=>{}};\n" + zp._inject_status_main_block("j").decode())
+            path = f.name
+        try:
+            r = subprocess.run([node, "--check", path], capture_output=True)
+            self.assertEqual(r.returncode, 0,
+                             f"注入状态 main handler 语法错误：{r.stderr[:300]}")
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_preload_injection_is_valid_js(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("no node")
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                         encoding="utf-8") as f:
+            f.write("const _={ipcRenderer:{invoke:()=>{}}};\nconst o={"
+                    + zp._inject_status_preload_block("_").decode() + "x:1};")
+            path = f.name
+        try:
+            r = subprocess.run([node, "--check", path], capture_output=True)
+            self.assertEqual(r.returncode, 0,
+                             f"注入状态 preload 块语法错误：{r.stderr[:300]}")
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_status_handler_never_throws_on_missing_file(self):
+        """真跑 read handler：状态文件缺失也必须返回结构化 JSON（而非异常）。
+
+        注意：main 块里有两个 handler（read + apply），必须按通道名挑 read 那个——
+        apply handler 里的 import("electron") 在纯 node 下必炸，那不是本测试的对象。
+        跳过条件：没有 node。"""
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("no node")
+        code = zp._inject_status_main_block("j").decode()
+        harness = (
+            "const j={handle:(ch,fn)=>{if(ch===\"zcode:inject-status\")global.__h=fn}};\n"
+            + code
+            + "\n(async()=>{const r=await global.__h({}, undefined);"
+              "process.stdout.write(JSON.stringify({success:r&&r.success,"
+              "code:r&&r.code,pending:r&&r.pending===true}))})();\n"
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                         encoding="utf-8") as f:
+            f.write(harness)
+            path = f.name
+        try:
+            r = subprocess.run([node, path], capture_output=True, timeout=30)
+            out = (r.stdout or b"").decode("utf-8", "replace").strip()
+            self.assertEqual(r.returncode, 0,
+                             f"handler 真跑失败：{(r.stderr or b'')[:400]}")
+            got = json.loads(out)
+            # 本机可能已有状态文件（pending:true）也可能还没有（no-status），两者都合法
+            self.assertTrue(got["success"] or got["code"] == "no-status", f"异常返回: {got}")
+            if got["success"]:
+                self.assertIsInstance(got["pending"], bool)
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_blocks_coexist_with_others(self):
+        """四块共用锚点互不干扰，摘除注入状态块不伤其它块。"""
+        blob = (b'_.contextBridge.exposeInMainWorld("zcode",{'
+                + zp._models_preload_block("_") + zp._enhance_preload_block("_")
+                + zp._tps_snapshot_preload_block("_")
+                + zp._inject_status_preload_block("_") + b"other:1});")
+        inj, synced, clean, _ = zp._inject_status_preload_state(blob)
+        self.assertTrue(inj and synced)
+        s = zp._block_span(blob, zp.INJECT_STATUS_BLOCK)
+        stripped = blob[:s[0]] + blob[s[1]:]
+        self.assertIsNone(zp._block_span(stripped, zp.INJECT_STATUS_BLOCK))
+        self.assertIn(zp._tps_snapshot_preload_block("_"), stripped)
+        self.assertIn(zp._enhance_preload_block("_"), stripped)
+
+    def test_spec_uses_stable_sidecar_names(self):
+        self.assertEqual(zp.INJECT_STATUS_SPEC["side_suffix"], ".inject-status-patch.json")
+        self.assertEqual(zp.INJECT_STATUS_SPEC["bak_suffix"], ".inject-status.bak")
+        self.assertEqual(zp.INJECT_STATUS_SPEC["script_entry"], zp.INJECT_STATUS_SCRIPT_PATH)
+
+    def test_inject_status_uses_ipc_chain(self):
+        import inspect
+        src = inspect.getsource(zp.process_inject_status)
+        self.assertIn("_process_ipc_patch", src)
+        self.assertIn("INJECT_STATUS_SPEC", src)
+
+    def test_repack_sidecar_refresh_covers_new_suffix(self):
+        """重打包后 sidecar 指纹同步清单必须带上新后缀，否则 --check 把 sidecar 报成「无」。"""
+        import inspect
+        src = inspect.getsource(zp._refresh_repack_sidecars)
+        self.assertIn(".inject-status-patch.json", src)
+
+
+class TestInjectStatusSmoke(unittest.TestCase):
+    """注入状态角标的挂载与交互冒烟：最小 DOM 桩真跑 zcode-inject-status.js。
+
+    覆盖六场景：标题条结构挂载 / 固定兜底（no-drag）/ 弹窗开与三种关法（Esc、
+    取消、确认失败）/ 确认成功调用链（applyPatchesNow + toast）/ pending=false
+    不出现 / 无桥静默降级。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.node = shutil.which("node") or shutil.which("node.exe")
+        cls.smoke = _HERE / "inject_status_mount_smoke.js"
+        cls.script = None
+        for cand in (_HERE.parent / "scripts",
+                     _HERE.parent / "skills" / "zcode-tools" / "scripts"):
+            p = cand / "zcode-inject-status.js"
+            if p.is_file():
+                cls.script = p
+                break
+        if cls.script is None:
+            raise unittest.SkipTest("未找到注入状态角标脚本")
+
+    def test_mount_and_interaction_smoke(self):
+        if not self.node:
+            self.skipTest("no node")
+        r = subprocess.run([self.node, str(self.smoke), str(self.script)],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")
+        self.assertEqual(r.returncode, 0,
+                         f"冒烟失败：{r.stdout}{r.stderr}")
+        self.assertIn("全部通过", r.stdout)
+
+
+class TestPatchStatusFile(unittest.TestCase):
+    """渲染层「待注入」角标的真相源：sync.write_patch_status 写 zcode-patches-status.json。
+
+    有分歧（deferred）→ pending:true；全一致 → pending:false。看护应用成功后由
+    apply_after_exit._write_status 再写一遍 pending:false 双保险。"""
+
+    def test_write_patch_status_pending_flag(self):
+        import sync
+        import tps_snapshot
+        with tempfile.TemporaryDirectory() as d:
+            orig = tps_snapshot.resolve_v2_root
+            tps_snapshot.resolve_v2_root = lambda: Path(d)
+            try:
+                sync.write_patch_status({"tps_footer": True, "model_puller": False})
+                data = json.loads((Path(d) / "zcode-patches-status.json").read_text(encoding="utf-8"))
+                self.assertTrue(data["pending"])
+                self.assertEqual(data["items"], {"tps_footer": True, "model_puller": False})
+                sync.write_patch_status({})
+                data = json.loads((Path(d) / "zcode-patches-status.json").read_text(encoding="utf-8"))
+                self.assertFalse(data["pending"])
+                self.assertEqual(data["items"], {})
+            finally:
+                tps_snapshot.resolve_v2_root = orig
+
+    def test_watchdog_write_status_clears_pending(self):
+        import apply_after_exit as aae
+        with tempfile.TemporaryDirectory() as d:
+            orig = zp._v2_root
+            zp._v2_root = lambda override=None: Path(d)
+            try:
+                aae._write_status(True, "测试失败原因")
+                data = json.loads((Path(d) / "zcode-patches-status.json").read_text(encoding="utf-8"))
+                self.assertTrue(data["pending"])
+                self.assertEqual(data["last_error"], "测试失败原因")
+                aae._write_status(False)
+                data = json.loads((Path(d) / "zcode-patches-status.json").read_text(encoding="utf-8"))
+                self.assertFalse(data["pending"])
+                self.assertNotIn("last_error", data)
+            finally:
+                zp._v2_root = orig
+
+
+class TestParseWantsUnknownKeys(unittest.TestCase):
+    """回归（0.6.38）：WANT_FILE 由「合并旧文件 + update 新值」维护（sync 只增不删），
+    历史残留键（如 0.6.34 移除的 usage_chart）会永远留在里面——parse_wants 直接
+    PATCH_ARGS[key] 是 KeyError，看护在等待前就崩溃且无人值守无声（实测日志三连崩）。
+    未知键必须跳过并留痕。"""
+
+    def test_unknown_keys_are_skipped_not_fatal(self):
+        import apply_after_exit as aae
+        with tempfile.TemporaryDirectory() as d:
+            wf = Path(d) / "_watchdog.want"
+            wf.write_text('{"usage_chart": false, "tps_footer": true, "model_puller": false}',
+                          encoding="utf-8")
+            orig = aae.WANT_FILE
+            aae.WANT_FILE = wf
+            try:
+                tasks = aae.parse_wants([])
+            finally:
+                aae.WANT_FILE = orig
+            self.assertEqual(tasks, [(["--tps-footer"], False), (["--model-puller"], True)])
+
+
 class TestEnhancePromptScript(unittest.TestCase):
     """润色按钮的挂载逻辑：按钮既不能渲染到会话消息区，也不能跑到输入框左上角。
 
@@ -2534,16 +2794,17 @@ class TestAutoInject(unittest.TestCase):
         """看护必须将同方向的补丁参数合并为批量调用，避免多次解包/重打包 asar 导致 20s+ 耗时。"""
         import apply_after_exit as aae
 
-        # ① 全量默认任务（3项全部应用）应合并为 1 次批量调用
+        # ① 全量默认任务（4项全部应用）应合并为 1 次批量调用
         default_tasks = [(args, False) for args in aae.DEFAULT_TASKS]
         batched = aae.batch_tasks(default_tasks)
-        self.assertEqual(len(batched), 1, "全量 3 项应用任务应合并为单次调用")
+        self.assertEqual(len(batched), 1, "全量 4 项应用任务应合并为单次调用")
         args, rev = batched[0]
         self.assertFalse(rev)
         self.assertIn("--tps-footer", args)
         self.assertIn("--enhance-prompt", args)
         self.assertIn("--model-puller", args)
-        self.assertEqual(len(args), 3)
+        self.assertIn("--inject-status", args)
+        self.assertEqual(len(args), 4)
 
         # ② 混合任务：关闭项走一次 revert，开启项走一次 apply（先还原后应用）
         mixed_tasks = [
@@ -2794,7 +3055,7 @@ class TestConsoleEncoding(unittest.TestCase):
         self.assertNotIn("UnicodeEncodeError", out, out[-600:])
         self.assertNotIn("Traceback", out, out[-600:])
         self.assertIn("执行汇总", out)
-        self.assertIn("合计 3 项", out)
+        self.assertIn("合计 4 项", out)
 
 
 class TestZcodeLogScan(unittest.TestCase):
