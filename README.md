@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.34-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.35-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -149,6 +149,11 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.35（修复长回合中途「今日总耗/会话累计」冻结在回合初值，远低于官方用量页）
+- **根因**：状态栏数值 = max(事件流实时捕获, DB 快照)，但快照只在 SessionStart / Stop(轮末) / 看护时刷新；一个回合跑几十分钟、上百步工具调用时，快照一直冻在回合开始值，而官方用量页直接读 DB（每请求落库）实时领先——用户实测官方 15.9M、状态栏 9m，轮末快照一写才跳到 20m；事件流层还收不到其它会话（侧边栏/旧会话）的 usage.delta，同样只能等快照；
+- **修复**：新增 `PostToolUse` 钩子（每次工具调用触发）跑 `tps_snapshot.py --quiet --min-age 30`，快照 30s 内刷新过就只 stat 一次文件秒退、不碰 DB——回合中快照全程 ≤30s 新鲜，状态栏总耗/会话累计每 ≤30s 追上官方页，轮末 `Stop` 仍无条件精确刷一次；
+- **测试**：新增 `TestSnapshotMinAge`（新鲜秒退且不碰 DB——用不存在的 db 路径钉死、超龄/缺失走 DB、节流门是纯 stat）与 `test_post_tool_use_keeps_snapshot_fresh_mid_turn`（钩子必须带 --min-age 节流）；
 
 #### 0.6.34（移除用量页去截断功能，精简为 3 项补丁）
 - **功能移除**：删除用量页去截断补丁（趋势图/饼图全量）——`--usage-chart` 参数、字节级补丁实现与 `app.asar.chart-patch.json` sidecar 机制整体下线，`--all`、插件开关清单、看护默认任务、doctor 检查项同步收敛为 TPS 状态栏 / 增强提示词 / 模型拉取按钮 3 项；

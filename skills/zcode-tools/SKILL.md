@@ -436,7 +436,7 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 
 **结算层**（0.6.26，精确值 + 全历史，秒级延迟）：
 
-6. Python 侧 `tps_snapshot.py` 只读 `~/.zcode/cli/db/db.sqlite`（`mode=ro`），按 `session_id` 聚合 `model_usage`（`status='completed'`）+ 今日全局，写 `~/.zcode/v2/ztps-snapshot.json`；每会话同时带 `turns`（`count(distinct turn_id)`）与 `requests`（completed 行数=模型请求数），供状态栏 `N轮N步` 使用。触发点：SessionStart worker、**每轮结束的 `Stop` 钩子**（0.6.27，DB 只有轮末落库，只靠 SessionStart 会把今日总耗冻在会话开始那一刻）、看护写补丁前。无新增常驻进程。口径移植自 `xhwxt/zcode-token-usage-statusbar` (MIT)：合计=`computed_total`（=input+output，cache 已含 input 不重复加），命中=`cache_read/input`。钩子调用必须带 `--quiet`，否则 stdout 非 JSON 会被判钩子失败。
+6. Python 侧 `tps_snapshot.py` 只读 `~/.zcode/cli/db/db.sqlite`（`mode=ro`），按 `session_id` 聚合 `model_usage`（`status='completed'`）+ 今日全局，写 `~/.zcode/v2/ztps-snapshot.json`；每会话同时带 `turns`（`count(distinct turn_id)`）与 `requests`（completed 行数=模型请求数），供状态栏 `N轮N步` 使用。触发点：SessionStart worker、**每轮结束的 `Stop` 钩子**（0.6.27，DB 只有轮末落库，只靠 SessionStart 会把今日总耗冻在会话开始那一刻）、**回合内每次工具调用的 `PostToolUse` 钩子**（0.6.35，带 `--min-age 30` 节流：快照 30s 内刷新过就秒退不碰 DB。修的是「长回合中途总耗冻在回合初值」——用户实测官方用量页 15.9M、状态栏 9m，轮末快照一写才跳到 20m）、看护写补丁前。无新增常驻进程。口径移植自 `xhwxt/zcode-token-usage-statusbar` (MIT)：合计=`computed_total`（=input+output，cache 已含 input 不重复加），命中=`cache_read/input`。钩子调用必须带 `--quiet`，否则 stdout 非 JSON 会被判钩子失败。
 7. 渲染层经 `zcode:tps-snapshot` IPC（preload 桥 + main 只读 handler，与 enhance bridge 同锚点模式）取快照，3s TTL 缓存，**轮次结束强制失效**（`_snapCache.at = 0`）即时取本轮结算值；以 `Math.max(事件累计, 快照值)` 回填会话输入/输出/命中、轮数/步数（快照 `turns/requests` + 流式中轮次补差）与今日总耗——事件优先、快照补漏，流式值不会被拉低。快照缺失/损坏/无桥时静默降级为纯事件流（`__ztpsDiag.snapshotHit/snapshotOk/snapshotErr/snapshotTs/snapshotToday/snapshotAge/aggRounds/aggSteps/snapTurns/snapRequests` 可查）。
 8. **handler 参数陷阱**（0.6.27 修复）：`ipcMain.handle(ch, (event, ...args))` 的第二参数是**渲染层实参**，不是模块。0.6.26 写成 `async(ev,t)=>{...t.join(...)}` 而 preload 不传参 → `t===undefined` → 每次 invoke 抛 TypeError → 永远 `read-failed`，快照整条链路静默失效（表现为输入/命中不显示、今日总耗只吃 localStorage 存量）。路径模块必须用 `import` 进来的 `r`。
 
@@ -460,7 +460,7 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 | console 出现 CSP 拦截报错 | 当前版本 index.html 无 CSP；若未来版本加了，需同步放宽 `script-src` 允许同目录脚本 |
 | 指标一直只有「●」/「● 总耗」 | usage.delta 未关联到轮（看 `window.__ztpsTurns` 里轮的 outputTokens/inputTokens/lastUsageAt 是否为空）；版本升级导致帧结构变化时，用 `window.__ztpsPort` 旁路监听原始帧比对字段 |
 | 输入/平均命中不出现但输出正常 | 先看 `__ztpsDiag.snapshotErr`：`read-failed` = main handler 读到快照但抛错（0.6.26 的 `t.join` 参数误用就是这类，0.6.27 已修）；`no-snapshot` = 快照文件没生成（跑 `python tps_snapshot.py --check` 查库，`--tps-footer --check` 看 4 组件）；undefined + `snapshotOk:false` = IPC 桥缺失。再看 `pendingUsageSize/appliedFromPending`：前者涨后者 0 = 事件桥接断裂 |
-| 今日总耗不变化 | ①`snapshotErr` 有值 = 快照链路断（见上一行）；②`snapshotOk:true` 但 `snapshotTs` 不变 = 快照文件没刷新，检查 `Stop` 钩子是否在跑（`hooks/hooks.json`）、手动 `python tps_snapshot.py` 后数值应变；③只有 localStorage 在涨=事件流 usage.delta 没到 |
+| 今日总耗不变化 | ①`snapshotErr` 有值 = 快照链路断（见上一行）；②`snapshotOk:true` 但 `snapshotTs` 不变 = 快照文件没刷新，检查 `Stop` / `PostToolUse`（`--min-age 30` 节流）钩子是否在跑（`hooks/hooks.json`）、手动 `python tps_snapshot.py` 后数值应变；③只有 localStorage 在涨=事件流 usage.delta 没到；④回合**进行中**数值每 30s 才涨一次属预期（`--min-age` 节流），轮末 `Stop` 会再精确刷一次 |
 | 旧会话无累计 | 快照未命中：先看 `__ztpsDiag.domSessionId`——为 null/`draft` 说明会话 id 没取到（0.6.28 已加事件流 sessionId 兜底）；再看 `snapshotAge` 过大或 -1 = IPC 桥缺失/快照过期，手动跑 `python tps_snapshot.py` 刷新后重开会话 |
 | tok/s 不出现 | 该轮从未有过文本流（纯工具调用轮）时无速度可算，属预期；有文本流后静默期（工具执行）保持最近值 |
 | 想换脚本逻辑 | 改 zcode-tps.js 后重跑 `--tps-footer`（内容变了会自动热更新脚本条目，无需 revert） |

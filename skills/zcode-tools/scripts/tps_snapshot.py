@@ -15,6 +15,7 @@ tok/s / 输出估算）仍由 zcode-tps.js 的 ServicePort 事件流承担。两
     python tps_snapshot.py                 # 全量快照 -> <v2>/ztps-snapshot.json
     python tps_snapshot.py --sid <id>      # 仅查一个会话（stdout JSON，不写文件）
     python tps_snapshot.py --check         # 只读探针：库存在/表结构/行数
+    python tps_snapshot.py --min-age 30    # 快照 30s 内已刷新过则跳过（PostToolUse 节流）
 """
 
 from __future__ import annotations
@@ -142,6 +143,20 @@ def snapshot_path() -> Path:
     return resolve_v2_root() / SNAPSHOT_NAME
 
 
+def snapshot_fresh(dest: Path, min_age_s: int) -> bool:
+    """快照文件存在且 mtime 距今不足 min_age_s 秒 → 视为仍新。
+
+    PostToolUse 钩子的节流快路径：长回合（agent 连续跑几百步工具调用）中途
+    Stop 钩子不会触发，快照会冻在回合开始值，「今日总耗」也就一直停在旧值
+    （用户实测：官方用量页 15.9M、状态栏 9m）。PostToolUse 每次工具调用都
+    跑本脚本，但只有快照超过 min_age 秒才真正读 DB 重写，其余情况秒退。
+    """
+    try:
+        return (time.time() - dest.stat().st_mtime) < min_age_s
+    except OSError:
+        return False
+
+
 def write_snapshot(snap: dict, dest: Path | None = None) -> Path:
     dest = dest or snapshot_path()
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -166,6 +181,8 @@ def main(argv: list[str] | None = None, quiet: bool = False) -> int:
     ap.add_argument("--db", default=None, help="覆盖 db 路径（测试用）")
     ap.add_argument("--quiet", action="store_true",
                     help="静默（钩子调用时用：stdout 非 JSON 会被判钩子失败）")
+    ap.add_argument("--min-age", type=int, default=0, metavar="SEC",
+                    help="快照文件距今不足 SEC 秒则直接跳过（PostToolUse 节流，避免高频重读 DB）")
     args = ap.parse_args(argv)
     quiet = quiet or args.quiet
     safe_stdio()
@@ -174,6 +191,12 @@ def main(argv: list[str] | None = None, quiet: bool = False) -> int:
     def say(msg: str) -> None:
         if not quiet:
             print(msg)
+
+    # 节流快路径：只 stat 一次文件，不碰 DB。--check/--sid 是显式查询，不受节流限制。
+    if (args.min_age > 0 and not args.check and not args.sid
+            and snapshot_fresh(snapshot_path(), args.min_age)):
+        say(f"[.] 快照仍新（<{args.min_age}s），跳过刷新")
+        return 0
     try:
         con = connect_ro(db)
     except Exception as e:

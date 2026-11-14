@@ -23,6 +23,18 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"${CLAUDE_PLUGIN_ROOT}/skills/zcode-tools/scripts/tps_snapshot.py\" --quiet --min-age 30 || python3 \"${CLAUDE_PLUGIN_ROOT}/skills/zcode-tools/scripts/tps_snapshot.py\" --quiet --min-age 30",
+            "shell": true,
+            "timeoutMs": 15000
+          }
+        ]
+      }
     ]
   }
 }

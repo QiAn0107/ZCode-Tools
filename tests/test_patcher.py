@@ -3210,6 +3210,23 @@ class TestPluginHookSpec(unittest.TestCase):
         for c in cmds:
             self.assertIn("--quiet", c, "钩子调用必须 --quiet，否则 stdout 会污染钩子协议")
 
+    def test_post_tool_use_keeps_snapshot_fresh_mid_turn(self):
+        """回合中途（工具调用间隙）节流刷新快照：长回合里 Stop 一直不触发，
+        「今日总耗/会话累计」会冻在回合开始值（用户实测：官方用量页 15.9M、
+        状态栏总耗 9m，轮末快照一写才跳到 20m）。
+
+        PostToolUse 每次工具调用都会跑 tps_snapshot.py，必须带 --min-age 节流，
+        否则每步工具调用都全量重读 DB（16k 行 × 几百步不可接受）。
+        """
+        posts = self._spec()["hooks"].get("PostToolUse")
+        self.assertTrue(posts, "缺 PostToolUse 钩子，长回合中途快照会一直冻结")
+        cmds = [h["command"] for m in posts for h in m["hooks"]]
+        self.assertTrue(any("tps_snapshot.py" in c for c in cmds),
+                        f"PostToolUse 钩子没有调用快照脚本：{cmds}")
+        for c in cmds:
+            self.assertIn("--quiet", c, "钩子调用必须 --quiet，否则 stdout 会污染钩子协议")
+            self.assertIn("--min-age", c, "PostToolUse 高频触发，必须带 --min-age 节流")
+
     def test_every_hook_uses_declared_fields_only(self):
         seen = []
         for path, h in self._hooks():
@@ -3254,6 +3271,61 @@ class TestPluginHookSpec(unittest.TestCase):
 
 
 # ------------------------------------------------------- bootstrap.py（引导脚本）
+
+class TestSnapshotMinAge(TempCase):
+    """--min-age 节流快路径：快照仍新时必须**不碰 DB** 直接退出。
+
+    根因背景：快照只在 SessionStart / Stop(轮末) / 看护时刷新，长回合（一个
+    回合跑几百步工具调用）中途「今日总耗」冻在回合开始值，远低于官方用量页
+    的实时 DB 值。PostToolUse + --min-age 30 让快照在回合内保持 ≤30s 新鲜；
+    节流判断只许 stat 一次文件，绝不能为了判断新鲜度去开 DB（每次工具调用
+    都全量读 16k 行不可接受）。
+    """
+
+    def setUp(self):
+        super().setUp()
+        import tps_snapshot as tps
+        self.tps = tps
+        self.snap = self.tmp / "ztps-snapshot.json"
+
+    def _run(self, *extra):
+        """跑 main()，快照路径指到临时目录；db 故意指向不存在的文件，
+        快路径一旦失效去开 DB 就会以 1 退出——用退出码钉死「没碰 DB」。"""
+        orig = self.tps.snapshot_path
+        self.tps.snapshot_path = lambda: self.snap
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = self.tps.main(["--db", str(self.tmp / "no-such-db.sqlite"), *extra])
+            return rc, buf.getvalue()
+        finally:
+            self.tps.snapshot_path = orig
+
+    def test_fresh_snapshot_skips_without_touching_db(self):
+        self.snap.write_text("{}", encoding="utf-8")
+        rc, out = self._run("--min-age", "30")
+        self.assertEqual(rc, 0, f"快路径没生效（开了 DB）: {out}")
+        self.assertIn("跳过刷新", out)
+
+    def test_stale_snapshot_proceeds_to_db(self):
+        self.snap.write_text("{}", encoding="utf-8")
+        old = time.time() - 120
+        os.utime(self.snap, (old, old))
+        rc, _out = self._run("--min-age", "30")
+        self.assertEqual(rc, 1, "超龄快照应继续走 DB（db 不存在 → 失败退出 1）")
+
+    def test_missing_snapshot_proceeds_to_db(self):
+        rc, _out = self._run("--min-age", "30")
+        self.assertEqual(rc, 1, "快照缺失应继续走 DB 重建")
+
+    def test_freshness_gate_is_a_pure_stat(self):
+        self.assertFalse(self.tps.snapshot_fresh(self.tmp / "gone.json", 30))
+        self.snap.write_text("{}", encoding="utf-8")
+        self.assertTrue(self.tps.snapshot_fresh(self.snap, 30))
+        old = time.time() - 120
+        os.utime(self.snap, (old, old))
+        self.assertFalse(self.tps.snapshot_fresh(self.snap, 30))
+
 
 class TestBootstrapScript(unittest.TestCase):
     """`bootstrap.py` 声称「Windows / macOS / Linux 都能直接运行、不含任何本机绝对路径」。
