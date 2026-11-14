@@ -130,6 +130,114 @@ class TestSessionUsage(TpsSnapshotTestBase):
         self.assertEqual(u["ctx"], 0)
 
 
+class TestLastRequestMetrics(TpsSnapshotTestBase):
+    """0.6.42 移植参考实现的权威 TPS/首token 口径（_last_request_metrics）。
+
+    会话快照新增 last_tps/last_ttft_ms/last_out/last_completed_at/last_model_id，
+    取最近一条**可见** completed 请求（main_turn/compact，剔除 session_title/
+    subagent 隐藏请求）：tps = output ÷ (completed_at − first_token_at)，
+    缺 first_token_at 退化 duration_ms；供渲染层在事件漏采或事件层缺值时兜底，
+    事件层有值时渲染侧绝不覆盖。"""
+
+    def setUp(self):
+        self.con = sqlite3.connect(":memory:")
+        self.con.execute("""create table model_usage(
+            id text, session_id text, turn_id text, status text,
+            input_tokens integer, output_tokens integer, reasoning_tokens integer,
+            cache_read_input_tokens integer, cache_creation_input_tokens integer,
+            computed_total_tokens integer, tool_call_count integer, retry_count integer,
+            completed_at integer, query_source text,
+            duration_ms integer, time_to_first_token_ms integer,
+            first_token_at integer, model_id text)""")
+        self.addCleanup(self.con.close)
+
+    def add_full(self, rid, turn, status, i, o, at, dur=0, ttft=0, first=0, model="m-1",
+                 qsrc="main_turn"):
+        self.con.execute(
+            "insert into model_usage values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (rid, self.SID, turn, status, i, o, 0, 0, 0, i + o, 0, 0,
+             at, qsrc, dur, ttft, first, model))
+        self.con.commit()
+
+    def test_tps_from_first_token_at(self):
+        self.add_full("a", "t1", "completed", 500, 100, at=3000, first=1000, dur=2500, ttft=400)
+        u = ts.session_usage(self.con, self.SID)
+        self.assertEqual(u["last_tps"], 50.0)   # 100 tok ÷ (3000−1000)ms
+        self.assertEqual(u["last_ttft_ms"], 400)
+        self.assertEqual(u["last_out"], 100)
+        self.assertEqual(u["last_completed_at"], 3000)
+        self.assertEqual(u["last_model_id"], "m-1")
+
+    def test_tps_falls_back_to_duration_ms(self):
+        self.add_full("a", "t1", "completed", 500, 100, at=5000, first=0, dur=2000)
+        u = ts.session_usage(self.con, self.SID)
+        self.assertEqual(u["last_tps"], 50.0, "缺 first_token_at → 生成耗时退化为 duration_ms")
+
+    def test_tps_zero_on_zero_output(self):
+        self.add_full("a", "t1", "completed", 500, 0, at=3000, first=2000, dur=1000)
+        u = ts.session_usage(self.con, self.SID)
+        self.assertEqual(u["last_tps"], 0)
+
+    def test_tps_zero_on_inverted_first_token(self):
+        self.add_full("a", "t1", "completed", 500, 100, at=1000, first=2000, dur=0)
+        u = ts.session_usage(self.con, self.SID)
+        self.assertEqual(u["last_tps"], 0, "completed_at ≤ first_token_at 不可信，记 0")
+
+    def test_tps_zero_on_tiny_gen_ms(self):
+        self.add_full("a", "t1", "completed", 500, 100, at=1150, first=1100, dur=150)
+        u = ts.session_usage(self.con, self.SID)
+        self.assertEqual(u["last_tps"], 0, "gen_ms<100 分母过小不可信，记 0")
+
+    def test_tie_break_prefers_higher_id(self):
+        self.add_full("r1", "t1", "completed", 500, 10, at=3000, first=2000, dur=1000)
+        self.add_full("r2", "t2", "completed", 500, 100, at=3000, first=2000, dur=1000)
+        u = ts.session_usage(self.con, self.SID)
+        self.assertEqual(u["last_out"], 100, "同 completed_at 按 id desc 取后写的请求")
+
+    def test_non_completed_not_selected(self):
+        self.add_full("a", "t1", "completed", 500, 10, at=1000, first=500, dur=500)
+        self.add_full("b", "t2", "cancelled", 500, 999, at=9000, first=8000, dur=1000)
+        u = ts.session_usage(self.con, self.SID)
+        self.assertEqual(u["last_out"], 10, "非 completed 行不参与权威值")
+
+    def test_hidden_requests_not_selected_as_authority(self):
+        """session_title/subagent 隐藏请求不作为权威 tok/s 来源（用户看不到它们）。
+
+        实测一 session 的最后落库行是标题生成（102 tok @16 tok/s），直接取会拿
+        「标题速度」兜底；过滤后取最近的可见请求（main_turn/compact）。
+        """
+        self.add_full("a", "t1", "completed", 500, 50, at=1000, first=500, dur=500)
+        self.add_full("b", "t9", "completed", 500, 102, at=9000, first=6000, dur=3000,
+                      qsrc="session_title")
+        u = ts.session_usage(self.con, self.SID)
+        self.assertEqual(u["last_out"], 50, "隐藏的标题请求不作为权威 tok/s 来源")
+        self.assertEqual(u["last_completed_at"], 1000)
+
+    def test_compact_continuation_is_selectable(self):
+        """compact 续接是用户可见的同轮内容，可作权威 tok/s 来源。"""
+        self.add_full("a", "t1", "completed", 500, 50, at=1000, first=500, dur=500)
+        self.add_full("b", "t1c", "completed", 500, 80, at=9000, first=5000, dur=4000,
+                      qsrc="compact")
+        u = ts.session_usage(self.con, self.SID)
+        self.assertEqual(u["last_out"], 80)
+
+    def test_legacy_schema_without_duration_columns(self):
+        con2 = sqlite3.connect(":memory:")
+        self.addCleanup(con2.close)
+        con2.execute("""create table model_usage(
+            id text, session_id text, turn_id text, status text,
+            input_tokens integer, output_tokens integer, reasoning_tokens integer,
+            cache_read_input_tokens integer, cache_creation_input_tokens integer,
+            computed_total_tokens integer, tool_call_count integer, retry_count integer,
+            completed_at integer)""")
+        con2.execute("insert into model_usage values (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                     ("a", self.SID, "t1", "completed", 10, 1, 0, 0, 0, 11, 0, 0, 1000))
+        con2.commit()
+        u = ts.session_usage(con2, self.SID)
+        self.assertEqual(u["last_tps"], 0, "老库缺列：权威值记 0，渲染层回退事件层")
+        self.assertEqual(u["requests"], 1, "缺列只影响 last_*，聚合口径不受影响")
+
+
 class TestRangeUsage(TpsSnapshotTestBase):
 
     def test_range_bounds(self):

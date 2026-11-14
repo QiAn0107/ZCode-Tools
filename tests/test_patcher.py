@@ -1263,28 +1263,58 @@ class TestInjectionBlocks(unittest.TestCase):
 
 
 class TestTpsSnapshotBlock(unittest.TestCase):
-    """TPS 快照 IPC 桥（0.6.26）：渲染层经它读 Python 写的用量快照 JSON。
+    """TPS 快照 IPC 桥（0.6.26）+ main watcher 实时刷新链路（0.6.42）。
 
-    安全白名单：main handler 只做 fs.readFileSync 读快照文件——不连 sqlite、
-    不起子进程、不联网；刷新由 Python 侧（sync/看护）负责。"""
+    渲染层经 handler 读 Python 写的用量快照 JSON（纯 fs.readFileSync）。
+    0.6.42 起块尾追加 watcher（移植自参考实现 inject-main.cjs）：fs.watch 库目录
+    → 300ms 去抖 + 1500ms 限频 + busy 单飞 + 30s stat 心跳 → spawn 只读的
+    tps_snapshot.py --quiet 重算 → webContents.send("zcode:tps-push") 推送渲染层。
+    安全边界：spawn 只允许命中「指针 python + tps_snapshot.py --quiet +
+    windowsHide」这一个模式；不连 sqlite、不起 shell/同步子进程、不联网、
+    不写任何文件；非 electron 环境 import 失败整体 no-op。"""
 
     def test_preload_exposes_snapshot_bridge(self):
         code = zp._tps_snapshot_preload_block("_").decode()
         self.assertIn("getUsageSnapshot", code)
         self.assertIn("zcode:tps-snapshot", code)
+        self.assertIn("onTpsPush", code, "0.6.42 起必须暴露推送订阅桥")
+        self.assertIn("zcode:tps-push", code)
         self.assertIn(zp.TPS_SNAPSHOT_BLOCK, code, "块必须有标记定界")
 
-    def test_main_handler_is_readonly_file_bridge(self):
+    def test_main_block_readonly_except_whitelisted_spawn(self):
         code = zp._tps_snapshot_main_block("j").decode()
         self.assertIn('handle("zcode:tps-snapshot"', code)
         self.assertIn("ztps-snapshot.json", code)
         self.assertIn("readFileSync", code)
-        for banned in ("sqlite", "execFile", "execSync", "spawn", "fetch(",
-                       "httpsMod", "httpMod", "XMLHttpRequest", "writeFileSync"):
-            self.assertNotIn(banned, code, f"快照 handler 不得包含 {banned}")
+        for banned in ("sqlite3", "node:sqlite", "better-sqlite", "execFile", "execSync",
+                       "spawnSync", "fetch(", "httpsMod", "httpMod", "XMLHttpRequest",
+                       "writeFileSync", "appendFileSync"):
+            self.assertNotIn(banned, code, f"快照 main 块不得包含 {banned}")
         # 缺失/损坏必须返回可识别的失败码，渲染层据此降级为纯事件流
         self.assertIn("no-snapshot", code)
         self.assertIn("success:!1", code)
+
+    def test_watcher_spawn_is_whitelisted_safe_mode(self):
+        """watcher 的 spawn 必须且只能命中安全模式：指针 python +
+        scripts_dir/tps_snapshot.py + --quiet + windowsHide，异步单飞、15s 超时杀。"""
+        code = zp._tps_snapshot_main_block("j").decode()
+        self.assertIn("spawn:SP", code, "spawn 只能从 node:child_process 引入")
+        self.assertEqual(code.count("SP("), 1, "只允许一次 spawn 调用")
+        self.assertIn('SP(py,[args,"--quiet"]', code)
+        self.assertIn("windowsHide:!0", code)
+        self.assertIn('r.join(p.scripts_dir,"tps_snapshot.py")', code)
+        self.assertIn('"zcode-patches-scripts.json"', code,
+                      "python/脚本路径只能来自 sync 写的指针文件")
+        # 移植自参考实现的节流常量：去抖/重试 300ms、限频 1500ms、
+        # 心跳 30s、spawn 超时杀 15s、watch 挂失重连 5s
+        for ms in ("300", "1500", "30000", "15000", "5000"):
+            self.assertIn(ms, code)
+        # 推送通道 + webContents 守卫 + 非 electron 环境整体 no-op
+        self.assertIn('w.send("zcode:tps-push"', code)
+        self.assertIn("getAllWebContents", code)
+        self.assertIn("isDestroyed", code)
+        self.assertIn('import("electron")', code)
+        self.assertIn("setInterval(maybe,30000)", code)
 
     def test_handler_does_not_use_ipc_arguments(self):
         """回归：handler 第二参数是**渲染层实参**，不是 path 模块。

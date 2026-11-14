@@ -6,6 +6,7 @@
 //      验证跨午夜分桶、重复事件去重、30 天裁剪、损坏 JSON 容错；
 //   ③ 读侧：renderBar 必须经 readToday 取今日值，空态也要带总耗。
 //   ④ 会话累计：步数按 requestId 去重累计，快照 turns/requests 合并，渲染 N轮N步。
+//   ⑨ main watcher 推送订阅 + 结算权威 tok/s 兜底（0.6.42，事件有值不覆盖）。
 //
 // 用法：node tests/tps_daily_smoke.js skills/zcode-tools/scripts/zcode-tps.js
 // 退出码 0 = 通过；1 = 有断言失败；2 = 用法/读取错误。
@@ -180,7 +181,7 @@ check(/const room = bBottom - h\.bottom - GAP_TARGET/.test(src),
 check(/now - host\._fitAt > 1000/.test(src),
       "缺重量节流，布局/窗口变化后补偿不会刷新");
 check(!/parentRowGap/.test(src), "旧的 parentRowGap 猜测式补偿应已移除");
-check(/scriptVersion = "3\.22-turnstep"/.test(src), "脚本版本号未同步到 3.22-turnstep");
+check(/scriptVersion = "3\.23-settle"/.test(src), "脚本版本号未同步到 3.23-settle");
 
 // ---------- ⑤ 早到 delta pending 回放 ----------
 // 首批带 input 的 delta 常早于 turnHeader/respTurn 桥接到达：必须暂存待回放，
@@ -226,13 +227,32 @@ check(/const s = latest \? statsOf\(latest\)/.test(src),
 check(/steps: 0, reqIds: null/.test(src), "轮记录缺 steps/reqIds，步数无法累计");
 check(/t\.steps = 0; t\.reqIds = null/.test(src), "resetTurnStats 没清步数，编辑重发会带旧值");
 check(/agg\.steps \+= t\.steps \|\| 0/.test(src), "会话累计没有汇总步数");
-check(/const snapRounds = \(snap\.turns \|\| 0\) \+ streamTurns/.test(src) &&
-      /const snapSteps = \(snap\.requests \|\| 0\) \+ streamSteps/.test(src),
-      "快照 turns/requests 没有并入轮/步累计");
+check(/const snapRounds = snap\.turns \|\| 0/.test(src) &&
+      /const snapSteps = snap\.requests \|\| 0/.test(src) &&
+      /snapRounds > agg\.rounds/.test(src) && /snapSteps > agg\.steps/.test(src),
+      "快照 turns/requests 没有并入轮/步累计（0.6.36 起是 pure-max，不得再 +stream）");
 check(/span\(agg\.rounds \+ "轮"/.test(src) && /span\(agg\.steps \+ "步"/.test(src),
       "状态栏没有渲染 N轮N步");
 check(/for \(const drop of \[7, 1, 2, 3\]\)/.test(src),
       "降级顺序应把轮步排在最后(总耗→首token→tok/s→轮步)");
+
+// ---------- ⑨ main watcher 推送 + 结算权威兜底（0.6.42 移植自参考实现） ----------
+// 快照有新写入（DB 落库重算/钩子重写）由 main 主动推送，免等 3s TTL 拉取；
+// 结束轮的 tok/s 只在事件漏采或事件层缺值时用快照权威值兜底，事件层有值绝不覆盖，
+// 流式轮一律排除（DB 只在请求完成时落行，流中没有权威数据）。
+check(/window\.zcode\.onTpsPush/.test(src), "没有订阅 main watcher 的 zcode:tps-push 推送");
+check(/function onSnapshotPush\(/.test(src), "缺推送接收函数");
+check(/function acceptSnapshot\(/.test(src), "拉取与推送没有共用同一份缓存写入路径");
+check(/d\.stamp === _snapCache\.stamp/.test(src), "推送缺 stamp 去重，重复推送会反复重渲染");
+check(/snap\.last_tps \|\| 0\) > 0/.test(src),
+      "缺快照权威 tok/s 兜底（事件漏采/缺值时 tok/s 会冻在旧值）");
+check(/!\(latest && latest\.streaming\)/.test(src), "权威兜底必须排除流式轮（DB 无流中数据）");
+check(/dbNewer \|\| s\.tps == null/.test(src), "兜底条件必须保守：事件层有值时绝不覆盖");
+check(/latest\.lastUsageAt \|\| latest\.endedAt \|\| 0/.test(src) && /evAt \+ 3000/.test(src),
+      "漏采判据缺「DB 比事件层新 3s+」容差");
+check(/snapshotTpsApplied/.test(src), "diag 缺 snapshotTpsApplied，兜底是否生效无法定位");
+check(/lastPushStamp/.test(src), "diag 缺 lastPushStamp，推送是否到达无法定位");
+check(/pushSubscribed/.test(src), "diag 缺 pushSubscribed，订阅是否成功无法定位");
 
 function extractFn(name) {
   const head = "function " + name + "(";

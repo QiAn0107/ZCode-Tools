@@ -9,7 +9,12 @@ cache_read 已含在 input 内不重复加；命中率=cache_read/input。
 
 本脚本只做"结算层"快照（精确值、天然全历史）；流式实时层（首 token /
 tok/s / 输出估算）仍由 zcode-tps.js 的 ServicePort 事件流承担。两层在
-渲染侧以 Math.max 合并，事件优先、快照补漏。
+渲染侧以 Math.max 合并，事件优先、快照补漏。0.6.42 起会话快照额外携带
+最近一次 completed 请求的权威 tok/s / 首token 毫秒（last_tps/last_ttft_ms，
+口径见 _last_request_metrics），供渲染层在事件漏采或缺值时兜底校准；
+快照重建的触发除钩子（SessionStart/Stop/PostToolUse）外，还有注入到
+main 的 watcher：fs.watch 库目录变化 → spawn 本脚本 --quiet 重算 →
+经 zcode:tps-push 主动推给渲染层。
 
 用法（均为只读 DB，失败静默返回非零）：
     python tps_snapshot.py                 # 全量快照 -> <v2>/ztps-snapshot.json
@@ -38,7 +43,7 @@ except ImportError:
     from _console import safe_stdio
 
 SNAPSHOT_NAME = "ztps-snapshot.json"
-SNAPSHOT_VERSION = 1
+SNAPSHOT_VERSION = 2
 
 SESSION_SQL = """
 select count(*), coalesce(sum(input_tokens),0), coalesce(sum(output_tokens),0),
@@ -80,6 +85,61 @@ select count(*), coalesce(sum(input_tokens),0), coalesce(sum(output_tokens),0),
 from model_usage where status = 'completed' and completed_at >= ? and completed_at < ?
 """
 
+# 最新一条 completed 请求的权威指标（0.6.42 移植自参考实现的 TPS 口径）。
+# 可见性过滤（{qsrc_expr}）：session_title/git_commit_message/subagent 是用户看不到的
+# 隐藏请求（实测一session 的最后落库行是标题生成：102 tok @16 tok/s，拿它兜底会显示
+# 「标题速度」），只认 main_turn/compact（compact 续接是用户可见的同轮内容）；
+# 老库无 query_source 列时不过滤（与轮数口径的降级一致）。
+LAST_REQ_SQL = """
+select coalesce(output_tokens,0), coalesce(time_to_first_token_ms,0), coalesce(duration_ms,0),
+       coalesce(completed_at,0), coalesce(first_token_at,0), {model_expr}
+from model_usage where session_id = ? and status = 'completed' {qsrc_expr}
+order by completed_at desc, id desc limit 1
+"""
+
+
+def _probe_cols(con: sqlite3.Connection) -> list[str]:
+    try:
+        return [r[1] for r in con.execute("PRAGMA table_info(model_usage)")]
+    except sqlite3.Error:
+        return []
+
+
+def _last_request_metrics(con: sqlite3.Connection, sid: str, cols: list[str]) -> dict:
+    """最近一次 completed 请求的 tok/s 与首 token 毫秒（事件层的权威兜底值）。
+
+    口径移植自 xhwxt/zcode-token-usage-statusbar：生成耗时 = completed_at −
+    first_token_at（缺 first_token_at 时退化为 duration_ms），tps = output /
+    (gen_ms/1000)。gen_ms <100ms 或输出为 0 记 0（分母过小时数值不可信，渲染层
+    只把它当"事件层缺值/漏采"时的兜底，不会覆盖事件层有值的情况）。
+    老库缺列（无 time_to_first_token_ms/duration_ms）时全部记 0。
+    选取范围只认用户可见的请求（main_turn/compact，剔除 session_title/subagent
+    等隐藏请求——最后落库行常是标题生成，拿它兜底会显示「标题速度」）。
+    """
+    zeros = {"last_tps": 0, "last_ttft_ms": 0, "last_out": 0,
+             "last_completed_at": 0, "last_model_id": ""}
+    if not {"time_to_first_token_ms", "duration_ms"}.issubset(cols):
+        return zeros
+    model_expr = "coalesce(model_id,'')" if "model_id" in cols else "''"
+    qsrc_expr = ("and coalesce(query_source,'main_turn') in ('main_turn','compact')"
+                 if "query_source" in cols else "")
+    row = con.execute(LAST_REQ_SQL.format(model_expr=model_expr, qsrc_expr=qsrc_expr),
+                      (sid,)).fetchone()
+    if not row:
+        return zeros
+    out, ttft, dur, done_at, first_at, model = row
+    tps = 0.0
+    if out:
+        gen_ms = None
+        if first_at and done_at and done_at > first_at:
+            gen_ms = done_at - first_at
+        elif dur:
+            gen_ms = dur
+        if gen_ms and gen_ms >= 100:
+            tps = round(out / (gen_ms / 1000), 1)
+    return {"last_tps": tps, "last_ttft_ms": ttft or 0, "last_out": out,
+            "last_completed_at": done_at or 0, "last_model_id": model or ""}
+
 
 def resolve_cli_db() -> Path:
     """CLI 库路径：<base>/.zcode/cli/db/db.sqlite（base 服从 dataBaseDir）。"""
@@ -120,16 +180,19 @@ def connect_ro(db: Path) -> sqlite3.Connection:
         return con
 
 
-def session_usage(con: sqlite3.Connection, sid: str, has_qsrc: bool | None = None) -> dict:
+def session_usage(con: sqlite3.Connection, sid: str, has_qsrc: bool | None = None,
+                  cols: list[str] | None = None) -> dict:
     if has_qsrc is None:
         has_qsrc = _has_query_source(con)
     expr = TURNS_EXPR_QSRC if has_qsrc else TURNS_EXPR_PLAIN
     row = con.execute(SESSION_SQL.format(turns_expr=expr), (sid,)).fetchone()
     (n, i, o, r, cr, cw, tot, tools, ctx, turns, retries, last) = row
-    return {"requests": n, "input": i, "output": o, "reasoning": r,
-            "cache_read": cr, "cache_write": cw, "total": tot,
-            "tool_calls": tools, "ctx": ctx or 0, "turns": turns,
-            "retries": retries, "last_at": last}
+    u = {"requests": n, "input": i, "output": o, "reasoning": r,
+         "cache_read": cr, "cache_write": cw, "total": tot,
+         "tool_calls": tools, "ctx": ctx or 0, "turns": turns,
+         "retries": retries, "last_at": last}
+    u.update(_last_request_metrics(con, sid, cols if cols is not None else _probe_cols(con)))
+    return u
 
 
 def range_usage(con: sqlite3.Connection, start_ms: int, end_ms: int) -> dict:
@@ -152,9 +215,10 @@ def build_snapshot(con: sqlite3.Connection, sids: list[str] | None = None) -> di
         sids = [r[0] for r in con.execute(
             "select distinct session_id from model_usage where status='completed'")]
     has_qsrc = _has_query_source(con)  # PRAGMA 只探一次，不逐会话重复
+    cols = _probe_cols(con)
     sessions = {}
     for sid in sids:
-        u = session_usage(con, sid, has_qsrc)
+        u = session_usage(con, sid, has_qsrc, cols)
         if u["requests"] > 0:
             sessions[sid] = u
     s, e = today_range_ms()

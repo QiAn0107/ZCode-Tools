@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.41-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.42-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -150,6 +150,15 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.42（TPS 结算层实时化：移植参考实现的「DB 一变就重算 + 主动推送」链路 + 权威 tok/s 兜底）
+- **刷新不及时根因**：快照新鲜度由钩子节奏决定（Stop 每轮 / PostToolUse 30s 节流 / SessionStart），没有任何机制「DB 一变就重算」——长回合中事件层漏采（scid 关联失败 / pending 回放失败）时轮/步/用量要冻到下次结算，最坏 30s+；渲染层再叠 3s TTL 拉取；
+- **移植主进程 watcher**（对齐 xhwxt/zcode-token-usage-statusbar 的 inject-main.cjs）：`ztps-snapshot` main 块尾部新增 watcher 段——`fs.watch` 库目录（db.sqlite/-wal/-shm，WAL 写入也要感知）→ 300ms 去抖 → 1500ms 限频 + busy 单飞（限频窗口结束必补拉）→ 按指针文件 spawn 只读的 `tps_snapshot.py --quiet` 重算 → 读回快照 → `webContents.send("zcode:tps-push")` 推给渲染层；另监听快照文件本身（钩子写的同样推）。30s stat 心跳兜底 fs.watch 丢事件，挂失 5s 重连；**空闲零进程零轮询**。DB 落库 → 状态栏可见 ≈1-2s（与参考实现同级）；
+- **安全边界收紧为白名单模式**：main 块从「只读、不起子进程」改为「spawn 仅限安全模式」——只允许「指针文件 `zcode-patches-scripts.json` 里的 python + scripts_dir/tps_snapshot.py + --quiet + windowsHide」这一个模式（异步单飞、15s 超时杀），仍禁 sqlite/shell/同步子进程/联网/写文件；白名单测试逐字节锁死该模式（经确认放开）；非 electron 环境 import 失败整体 no-op，真跑 harness 照常；
+- **渲染层接推送**：`refreshSnapshot` 的缓存写入抽为 `acceptSnapshot`，拉取与推送共用；`onSnapshotPush` 按 stamp 去重、推送即重置 TTL 窗口；preload 桥新增 `onTpsPush(cb)`；无桥/旧版补丁时静默跳过，拉取兜底照旧。钩子（Stop/PostToolUse/SessionStart）保留为兜底写入者，与 watcher 并发写走 mkstemp+os.replace 原子替换；
+- **不准确根因①②（tok/s 与首token 的估算误差）**：快照会话级新增最近一条**可见** completed 请求的权威指标 `last_tps = output ÷ (completed_at − first_token_at)`（可见=main_turn/compact，剔除 session_title/subagent 隐藏请求——实测某会话最后落库行是标题生成，直接取会显示「标题速度」；缺 first_token_at 退化 duration_ms，gen_ms<100 或 0 输出记 0）与 `last_ttft_ms`（SNAPSHOT_VERSION 1→2，老渲染层忽略新字段向后兼容）；渲染层只在**事件漏采（DB 比事件层最新活动还新 3s+）或事件层算不出**两处兜底，事件层有值绝不覆盖，流式轮一律排除（DB 只在请求完成时落行，流中没有权威数据）——流式 tok/s 照旧走事件层 0 延迟，其余指标 max 合并逻辑不动；
+- **顺手纠正**：`tps_daily_smoke.js` §⑧ 还在断言 0.6.35 的 `+streamTurns` 旧形态（该冒烟未接 CI，对现行 pure-max 代码必挂），已改成现行形态并补 §⑨ 推送/兜底检查；
+- **测试**：全量 364 项通过（快照新增 last_* 数学 10 项：退化/倒挂/0 输出/分母过小/id 平局/非 completed/隐藏请求剔除/compact 可选/老库缺列；patcher 白名单改写 + watcher 安全模式逐字节锁死；`scriptVersion` 3.22-turnstep→3.23-settle）。
 
 #### 0.6.41（角标秒级亮起 + 退出后注入全程可见：主进程 stale 补触发 / check 并行 / 黑底金字进度小卡）
 - **角标不亮根因①（不依赖开会话）**：`SessionStart` 只在新会话第一轮触发——刚打开 ZCode 不开会话时 status 文件是上一会话的旧结论，插件刚更新时旧值 `pending:false` 让角标一直不亮（用户实测「有时候不显示」）。修复：`zcode:inject-status` 只读 handler 发现 status 缺失/损坏/时间戳过期(>30s)时，主进程按**指针文件**后台补触发一次 `sync.py --worker`（`windowsHide+detached+stdio:ignore`，一次性守卫防重复，失败静默不影响返回值；生成内容依旧零本机路径）；

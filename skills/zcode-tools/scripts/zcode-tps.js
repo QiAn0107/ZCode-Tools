@@ -141,6 +141,34 @@
   // 失败静默降级为纯事件流。
   const SNAP_TTL_MS = 3000;
   let _snapCache = { at: 0, ok: false, err: null, stamp: 0, sessions: null, today: null, pending: false };
+  // 快照接收（拉取与推送共用）：校验形状后写缓存并触发重渲染
+  function acceptSnapshot(r) {
+    if (r && r.success && r.sessions && r.today) {
+      _snapCache.ok = true;
+      _snapCache.err = null;
+      _snapCache.stamp = r.stamp || 0;
+      _snapCache.sessions = r.sessions;
+      _snapCache.today = r.today;
+      scheduleScan();
+      return true;
+    } else if (r) {
+      _snapCache.err = r.code || "bad-response";
+    }
+    return false;
+  }
+  // main watcher 主动推送（0.6.42 移植自参考实现）：DB 每条 completed 请求落库、
+  // 或快照被钩子重写时直接送达渲染层，免等 3s TTL 轮询。无桥/旧版补丁时本函数
+  // 无人订阅，refreshSnapshot 的拉取兜底照旧。
+  function onSnapshotPush(d) {
+    if (diag) { diag.lastPushAt = Date.now(); diag.lastPushStamp = (d && d.stamp) || 0; }
+    if (!d || !d.success || !d.sessions || !d.today) return;
+    if (d.stamp && d.stamp === _snapCache.stamp && _snapCache.ok) {
+      _snapCache.at = Date.now();   // 同一快照：只重置 TTL 窗口，避免紧随的拉取白跑
+      return;
+    }
+    _snapCache.at = Date.now();     // 推送即新鲜：TTL 窗口从现在起算
+    acceptSnapshot(d);
+  }
   function refreshSnapshot() {
     const now = Date.now();
     if (_snapCache.pending || now - _snapCache.at < SNAP_TTL_MS) return;
@@ -154,16 +182,7 @@
         p.then((r) => {
           _snapCache.pending = false;
           _snapCache.at = Date.now();
-          if (r && r.success && r.sessions && r.today) {
-            _snapCache.ok = true;
-            _snapCache.err = null;
-            _snapCache.stamp = r.stamp || 0;
-            _snapCache.sessions = r.sessions;
-            _snapCache.today = r.today;
-            scheduleScan();
-          } else if (r) {
-            _snapCache.err = r.code || "bad-response";
-          }
+          acceptSnapshot(r);
         }, () => { _snapCache.pending = false; _snapCache.at = Date.now(); _snapCache.err = "rejected"; });
       } else { _snapCache.pending = false; _snapCache.at = now; }
     } catch (err) { _snapCache.pending = false; _snapCache.at = now; _snapCache.err = "throw"; }
@@ -710,7 +729,7 @@
   let diag = null;
   try {
     diag = window.__ztpsDiag = window.__ztpsDiag || {};
-    diag.scriptVersion = "3.22-turnstep";
+    diag.scriptVersion = "3.23-settle";
     diag.loadedAt = new Date().toISOString();
   } catch (err) { /* ignore */ }
 
@@ -913,7 +932,8 @@
       }
       let host = document.querySelector("[" + MARK + "-bar]");
       // DB 快照结算层回填：事件优先、快照补漏（Math.max 保证流式值不被拉低）。
-      // 触发刷新（5s TTL，搭本次渲染顺带触发，不新增定时器）
+      // 触发刷新（3s TTL，搭本次渲染顺带触发，不新增定时器；0.6.42 起新快照由
+      // main watcher 经 zcode:tps-push 主动推送，拉取仅作兜底）
       refreshSnapshot();
       const snap = snapSession(domSess);
       if (snap) {
@@ -1031,6 +1051,23 @@
       }
       // 只有快照、没有事件流轮次（重开旧会话）时给一份空指标，只渲染累计区
       const s = latest ? statsOf(latest) : { stamp: null, ttft: null, tps: null, out: 0, reasoning: 0, streaming: false };
+      // 结算层权威兜底（0.6.42 移植自参考实现）：DB 每条 completed 请求自带官方
+      // first_token_at/completed_at，快照会话级携带最近一条可见请求的 tok/s
+      // （output÷生成耗时）与首token 毫秒。只在两种情况兜底，事件层有值时绝不覆盖：
+      //   ① 事件漏采（DB 可见请求比事件层最新活动还新 3s+，scid 关联失败/长回合漏帧
+      //      时 tok/s 冻在旧值）——判据用 last_completed_at（可见请求口径）而非 last_at，
+      //      因标题等隐藏请求总在轮末 +1~2s 落库，3s 容差不应被它们吃掉；
+      //   ② 事件层算不出（中止/缺 modelDurationMs/重开旧会话无事件流）。
+      // 流式轮不受影响——DB 只在请求完成时落行，流中没有权威数据。
+      if (snap && (snap.last_tps || 0) > 0 && !(latest && latest.streaming)) {
+        const evAt = latest ? (latest.lastUsageAt || latest.endedAt || 0) : 0;
+        const dbNewer = (snap.last_completed_at || snap.last_at || 0) > evAt + 3000;
+        if (dbNewer || s.tps == null) {
+          s.tps = snap.last_tps;
+          if (s.ttft == null && (snap.last_ttft_ms || 0) > 0) s.ttft = snap.last_ttft_ms;
+          if (diag) diag.snapshotTpsApplied = dbNewer ? "db-newer" : "no-event-tps";
+        }
+      }
       // 内容签名:未变化时完全跳过 DOM 写入与排版回流，达到零开销
       const key = [s.stamp, s.ttft, s.tps, s.out, s.reasoning, s.streaming,
                    agg.rounds, agg.steps, agg.input, agg.cache, agg.cacheWrite, agg.reasoning, agg.output,
@@ -1157,6 +1194,14 @@
       prune();
       removeLegacyFooters();
     }, 5000);
+    // main watcher 推送订阅（0.6.42）：快照有新写入直接送达；无桥/旧版补丁静默跳过，
+    // refreshSnapshot 的拉取兜底照旧。
+    try {
+      if (window.zcode && typeof window.zcode.onTpsPush === "function") {
+        window.zcode.onTpsPush(onSnapshotPush);
+        if (diag) diag.pushSubscribed = true;
+      }
+    } catch (err) { /* 静默 */ }
     scan();
   }
   if (document.body) start();

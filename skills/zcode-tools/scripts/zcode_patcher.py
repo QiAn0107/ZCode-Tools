@@ -790,7 +790,13 @@ catch(n){return{success:!1,error:String(n)}}});
 
 # ------------------------------------------------------------ TPS 快照的注入块
 
-_TPS_SNAPSHOT_HANDLER = '''
+# handler + watcher（0.6.42 起）各占一段。watcher 移植自参考实现 inject-main.cjs：
+# 库目录（db.sqlite/-wal/-shm）一有写入 → 300ms 去抖 → 1500ms 限频 + busy 单飞 →
+# 按指针文件 spawn 只读的 tps_snapshot.py --quiet 重算 → 读回快照 → 推给渲染层；
+# 另监听快照文件本身（钩子写的也推）。30s stat 心跳兜底 fs.watch 丢事件；
+# 空闲时零进程零轮询。非 electron 环境（真跑 harness/plain node）import 即败 →
+# 整体 no-op。watcher 唯一的外部副作用是 spawn 这一个只读脚本，不联网、不写文件。
+_TPS_SNAPSHOT_HANDLER = r'''
 __H__.handle("zcode:tps-snapshot",async(ev,t)=>{
 try{
 let{default:n}=await import("node:fs"),{default:r}=await import("node:path"),{default:i}=await import("node:os");
@@ -804,21 +810,64 @@ if(!snap||typeof snap!="object"||!snap.sessions||!snap.today){
 return{success:!1,code:"no-snapshot",error:"快照不存在或已损坏（等 SessionStart 钩子刷新）"}}
 return{success:!0,stamp:snap.stamp,sessions:snap.sessions,today:snap.today}
 }catch(err){return{success:!1,code:"read-failed",error:"读取快照失败："+String(err&&err.message||err)}}});
+;(async()=>{try{
+let{default:n}=await import("node:fs"),{default:r}=await import("node:path"),{default:i}=await import("node:os"),{spawn:SP}=await import("node:child_process");
+let{webContents:WC}=await import("electron");
+let base=i.homedir();
+try{let s=JSON.parse(n.readFileSync(r.join(base,".zcode","v2","setting.json"),"utf-8"));
+if(s&&typeof s.dataBaseDir=="string"&&s.dataBaseDir.trim())base=s.dataBaseDir.trim()}catch(_){}
+let root=r.join(base,".zcode","v2"),dbDir=r.join(base,".zcode","cli","db"),
+snapF=r.join(root,"ztps-snapshot.json"),ptrF=r.join(root,"zcode-patches-scripts.json");
+let seen=0,lastRun=0,lastPush=0,busy=!1,debDb=0,debSnap=0,retryT=0;
+let dbStamp=()=>{let m=0;for(let k of["db.sqlite","db.sqlite-wal","db.sqlite-shm"]){try{m=Math.max(m,n.statSync(r.join(dbDir,k)).mtimeMs)}catch(_){}}return m};
+let push=()=>{try{let j=JSON.parse(n.readFileSync(snapF,"utf-8"));
+if(j&&typeof j=="object"&&j.sessions&&j.today&&j.stamp&&j.stamp!==lastPush){lastPush=j.stamp;
+for(let w of WC.getAllWebContents()){try{if(!w.isDestroyed())w.send("zcode:tps-push",{success:!0,stamp:j.stamp,sessions:j.sessions,today:j.today})}catch(_){}}}}catch(_){}};
+let runSpawn=()=>{
+let py="",args="";
+try{let p=JSON.parse(n.readFileSync(ptrF,"utf-8"));
+if(p&&p.python&&p.scripts_dir){py=p.python;args=r.join(p.scripts_dir,"tps_snapshot.py")}}catch(_){}
+if(!args)return;
+busy=!0;let c=null,kt=null;
+try{c=SP(py,[args,"--quiet"],{windowsHide:!0,stdio:"ignore"})}catch(_){busy=!1;return}
+kt=setTimeout(()=>{try{c.kill()}catch(_){}},15000);
+c.on("error",()=>{clearTimeout(kt);busy=!1});
+c.on("close",()=>{clearTimeout(kt);busy=!1;push()})};
+let maybe=()=>{
+let st=dbStamp();if(!st||st===seen)return;
+if(busy||Date.now()-lastRun<1500){if(!retryT)retryT=setTimeout(()=>{retryT=0;maybe()},300);return}
+seen=st;lastRun=Date.now();runSpawn()};
+let arm=()=>{try{let w=n.watch(dbDir,(ev,f2)=>{if(f2&&!/db\.sqlite/.test(f2))return;clearTimeout(debDb);debDb=setTimeout(maybe,300)});
+w.on("error",()=>{try{w.close()}catch(_){}setTimeout(arm,5000)})}catch(_){setTimeout(arm,5000)}};
+arm();
+try{let w2=n.watch(root,(ev,f2)=>{if(f2&&f2!=="ztps-snapshot.json")return;clearTimeout(debSnap);debSnap=setTimeout(push,300)});
+w2.on("error",()=>{try{w2.close()}catch(_){}})}catch(_){}
+setInterval(maybe,30000);
+maybe();
+}catch(_){}})();
 '''
 
 
 def _tps_snapshot_preload_block(electron_alias: str) -> bytes:
-    """暴露 1 个桥方法：getUsageSnapshot() —— 读 Python 写的用量快照 JSON。
+    """暴露 2 个桥方法：getUsageSnapshot() 读 Python 写的用量快照 JSON；
+    onTpsPush(cb) 订阅 main watcher 的快照推送（zcode:tps-push，0.6.42 起）。
     快照缺失/损坏时 main 回 {success:!1}，渲染层静默降级为纯事件流。"""
     e = electron_alias
-    body = (f'getUsageSnapshot:()=>{e}.ipcRenderer.invoke("zcode:tps-snapshot"),').encode()
+    body = (f'getUsageSnapshot:()=>{e}.ipcRenderer.invoke("zcode:tps-snapshot"),'
+            f'onTpsPush:(cb)=>{{try{{{e}.ipcRenderer.on("zcode:tps-push",(_zpC,_zpP)=>{{'
+            f'try{{cb&&cb(_zpP)}}catch(_){{}}}})}}catch(_){{}}}},').encode()
     return _wrap_block(TPS_SNAPSHOT_BLOCK, body)
 
 
 def _tps_snapshot_main_block(ipc_alias: str) -> bytes:
-    """在 ipcMain 别名的 SaveMcpToUserDirectory 前插入快照读取 handler。
-    纯 fs.readFileSync，不连 sqlite、不起子进程、不联网；刷新由 Python 侧
-    （sync.py SessionStart / 看护）负责，main 只读。"""
+    """在 ipcMain 别名的 SaveMcpToUserDirectory 前插入快照读取 handler + DB watcher。
+
+    handler 纯 fs.readFileSync。watcher（0.6.42，移植自参考实现 inject-main.cjs）：
+    fs.watch 库目录（db.sqlite/-wal/-shm）→ 300ms 去抖 + 1500ms 限频 + busy 单飞 +
+    30s stat 心跳 → 按指针文件 zcode-patches-scripts.json spawn 只读的
+    tps_snapshot.py --quiet 重算 → 读回快照 → webContents.send("zcode:tps-push")
+    推给渲染层；另监听快照文件本身（钩子写的同样推送）。spawn 仅限这一个脚本，
+    不联网、不写文件；非 electron 环境 import 失败整体 no-op。"""
     return _wrap_block(TPS_SNAPSHOT_BLOCK,
                        _TPS_SNAPSHOT_HANDLER.replace("__H__", ipc_alias).encode())
 
