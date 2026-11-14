@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.38-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.39-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -150,6 +150,15 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.39（修注入状态角标首战两雷：点击退出后看护静默夭折 / 拉起后角标残留；看护链路加固）
+- **雷①：点角标关闭 ZCode 后无人注入拉起**——「退出并应用」handler 写的看护启动 `.cmd` 用 Node 默认 **UTF-8**，而 cmd.exe 按 **ANSI/GBK** 解析 `.cmd`，安装路径含中文（`实用小工具`）时变乱码 `瀹炵敤灏忓伐鍏穃` → pythonw 静默夭折、看护日志一片空白。**修复**：彻底不落 `.cmd` 中间文件——`schtasks /TR` 直接给「pythonw + apply_after_exit.py」两个带引号路径（Task Scheduler 以 UTF-16 存任务，天然免疫代码页）；/Create、/Run 结果强制追加进看护日志（`[apply-now]` 行），静默失败从此有迹可循；
+- **雷②根因之一：烤入路径过期**——handler 的看护脚本路径在**注入期烤入**，插件升级后指向旧副本（0.6.38 实测甚至指向开发仓库副本）。**修复**：sync.py 每次同步写指针文件 `<v2>/zcode-patches-scripts.json`（scripts_dir + python），handler 优先读指针（`existsSync` 校验），烤入路径仅作兜底；
+- **雷②：拉起后角标残留一段时间才消失**——`_write_status(failed == 0)` 参数写反，补丁全部成功却写 `pending:true`（日志实锤：「处理完成（失败 0 项）」与「pending=True」同屏）。**修复**：改 `failed > 0`；
+- **加固①看护单例跨版本共享锁**：`<v2>/zcode-watchdog.pid`——每个插件版本副本各有自己的 `_watchdog.pid`，升级前后两版看护可能同时等待，退出后并发重打包同一个 asar（一方必 rc!=0）；共享锁保证全机同时只有一个看护；
+- **加固②指纹刷新**：看护应用成功后调 `sync.refresh_client_fingerprint()`——重打包改了 asar 尺寸，不刷新的话下次启动会被误判成「客户端升级」弹假通知（0.6.38 实测每次都误报）；
+- **测试卫生**：`test_detach_falls_back_to_foreground_when_spawn_fails` 曾不打桩跑真 run_sync——真 check_state 子进程 + 真 start_watchdog（真 schtasks）把开发树看护武装到了用户机器（本机实测泄漏的看护用开发树打了 4 个补丁）。现补齐桩补丁，`TestSyncModes` 同步隔离 `CLIENT_FINGERPRINT`；
+- **测试**：全量 344 项通过；新增共享锁/指针文件/指纹刷新回归测试，`TestInjectStatusBlock` 断言更新（禁 .cmd、/TR 直写、指针、日志留痕）。
 
 #### 0.6.38（新增注入状态角标：补丁待写入时出现，点击确认后自动退出→看护注入→自动重启）
 - **新功能（第 4 项重打包级补丁 `--inject-status`，默认开）**：主窗口左上角标题条挂黑底金字「待注入」24px 角标（`#141414` 底 + `#E8B339` 金字金边），仅在补丁待写入时出现；点击弹原生风格确认弹窗（说明将**完全退出 ZCode**、未发送草稿会中断，列出待写入项；✕/取消/Esc/点遮罩均可关闭），确认后：main handler 复核 pending → 重写看护启动 `_watchdog_task.cmd` → `schtasks /Create+/Run ZCodePatchApply`（计划任务是唯一能逃出 ZCode Job 对象的启动方式）→ 200ms 后 `app.quit()`（被拦时 5s `app.exit(0)` 强退兜底）→ 看护等退出、写补丁、自动拉起，角标随 `pending:false` 消失；

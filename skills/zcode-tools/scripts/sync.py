@@ -495,6 +495,42 @@ def write_patch_status(deferred: dict) -> None:
         log(f"补丁状态文件写入失败（渲染层角标降级隐藏）: {e!r}")
 
 
+def write_scripts_pointer() -> None:
+    """把当前插件副本的 scripts 目录与解释器写进 v2 指针文件。
+
+    渲染层「退出并应用」handler 的烤入路径在插件升级后会过期——指向旧版本副本
+    （0.6.38 实测：烤入路径甚至指向开发仓库，其中文路径叠加 .cmd ANSI 解析导致
+    看护进程静默夭折）。指针文件让 handler 始终能找到**当前**副本的看护脚本。
+    """
+    import os as _os
+    import tempfile as _tempfile
+    try:
+        sys.path.insert(0, str(HERE))
+        import tps_snapshot
+        dest = tps_snapshot.resolve_v2_root() / "zcode-patches-scripts.json"
+        exe = Path(sys.executable or "python")
+        pyw = exe.with_name("pythonw.exe")
+        if pyw.is_file():
+            exe = pyw          # GUI 子系统：计划任务里不闪控制台（与 _start_watchdog_task 一致）
+        data = {"v": 1, "stamp": int(time.time() * 1000),
+                "scripts_dir": str(HERE), "python": str(exe)}
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = _tempfile.mkstemp(dir=str(dest.parent),
+                                    prefix=".zpatch-scripts-", suffix=".tmp")
+        try:
+            with _os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+            _os.replace(tmp, dest)
+        except BaseException:
+            try:
+                _os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except Exception as e:
+        log(f"脚本指针文件写入失败（渲染层回退烤入路径）: {e!r}")
+
+
 def resolve_wanted() -> tuple[dict, str]:
     """算出这次要同步成什么样，返回 (期望状态, 来源说明)。
 
@@ -593,6 +629,9 @@ def run_sync(echo: bool = False) -> str:
     # 角标出现、可一键「退出并应用」；全一致 → pending:false。应用成功后由看护
     # （apply_after_exit._write_status）清零，双写保证任一环失败角标也不会说谎。
     write_patch_status(deferred)
+    # 脚本指针：渲染层 apply-now 据此定位**当前**副本的看护脚本（0.6.39，
+    # 烤入路径在插件升级后会过期）
+    write_scripts_pointer()
 
     # TPS 快照刷新（最佳努力）：让用量快照在每次会话启动时更新一次。
     # 渲染层经 zcode:tps-snapshot IPC 读快照做"结算层"回填；刷新失败静默，
@@ -647,6 +686,23 @@ def get_client_fingerprint() -> dict:
         }
     except Exception:
         return {}
+
+
+def refresh_client_fingerprint() -> dict:
+    """重读客户端指纹并写回指纹文件，返回新指纹（失败返回 {}）。
+
+    看护应用补丁后必须调用：重打包会改变 asar 尺寸，不刷新的话下一次
+    detect_upgrade_or_first_run 会把「我们自己刚做的重打包」误判成客户端升级，
+    弹一遍「已升级，重新排期」的假通知（0.6.38 实测：每次看护拉起后都误报一次）。
+    """
+    fp = get_client_fingerprint()
+    if fp:
+        try:
+            CLIENT_FINGERPRINT.write_text(json.dumps(fp, ensure_ascii=False),
+                                          encoding="utf-8")
+        except Exception:
+            pass
+    return fp
 
 
 def detect_upgrade_or_first_run() -> tuple[bool, bool, str]:

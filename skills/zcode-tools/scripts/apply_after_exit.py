@@ -261,7 +261,41 @@ def _cleanup_singletons(cur_pid: int) -> None:
         WANT_FILE.unlink(missing_ok=True)
     except Exception:
         pass
+    try:
+        sp = _shared_pid_file()
+        if sp is not None and sp.is_file() and sp.read_text(encoding="utf-8").strip() == str(cur_pid):
+            sp.unlink(missing_ok=True)
+    except Exception:
+        pass
     _delete_scheduled_task()
+
+
+def _shared_pid_file() -> Path | None:
+    """跨版本共享的看护单例锁：<v2>/zcode-watchdog.pid（取不到 v2 根时 None）。
+
+    插件每个版本副本各有自己的 _watchdog.pid（随副本目录走）：插件升级前后
+    两个版本的看护可能同时等待——各查各的 pid 会双双放行，退出后并发重打包
+    同一个 asar（一方必 rc!=0，状态文件还会把角标钉在 pending）。共享锁保证
+    「全机同时只有一个看护」，与副本级 pid 文件互为补充。
+    """
+    try:
+        return _import_patcher()._v2_root() / "zcode-watchdog.pid"
+    except Exception:
+        return None
+
+
+def _shared_watchdog_alive(cur_pid: int) -> int:
+    """共享锁里登记着别的活看护 → 返回其 PID；否则 0。"""
+    sp = _shared_pid_file()
+    if sp is None or not sp.is_file():
+        return 0
+    try:
+        old = int(sp.read_text(encoding="utf-8").strip() or 0)
+    except Exception:
+        return 0
+    if old != cur_pid and is_pid_alive(old):
+        return old
+    return 0
 
 
 def _write_status(pending: bool, last_error: str | None = None) -> None:
@@ -311,6 +345,18 @@ def main() -> int:
             pass
     try:
         PID_FILE.write_text(str(cur_pid), encoding="utf-8")
+    except Exception:
+        pass
+    # 跨版本共享锁：其它版本副本的看护还活着 → 合并需求后退出（见 _shared_pid_file）
+    other = _shared_watchdog_alive(cur_pid)
+    if other:
+        log(f"已有活跃看护运行中（共享锁 PID {other}），已登记最新需求，本实例退出")
+        _save_wants(sys.argv[1:])
+        return 0
+    try:
+        sp = _shared_pid_file()
+        if sp is not None:
+            sp.write_text(str(cur_pid), encoding="utf-8")
     except Exception:
         pass
     _save_wants(sys.argv[1:])
@@ -377,9 +423,21 @@ def main() -> int:
             failed += 1
 
     # 应用结果回写状态文件：全成功 → pending:false（角标消失）；有失败 → 保持
-    # pending:true + 原因（下次 SessionStart 的 sync 会重新评估并覆盖）
-    _write_status(failed == 0,
+    # pending:true + 原因（下次 SessionStart 的 sync 会重新评估并覆盖）。
+    # ★ 0.6.39 修复：此前写成 _write_status(failed == 0) —— 成功反而写 pending:true，
+    #   重启后角标残留（用户实测：拉起时角标还在，过一会儿才消失）。
+    _write_status(failed > 0,
                   None if failed == 0 else f"{failed} 项补丁应用失败（详见日志）")
+
+    # 刷新客户端指纹（最佳努力）：重打包改变 asar 尺寸，不刷新的话下一次
+    # SessionStart 的 detect_upgrade 会把「我们自己刚做的重打包」误判成客户端
+    # 升级，弹一遍「已升级，重新排期」的假通知（0.6.38 实测）。
+    try:
+        sys.path.insert(0, str(HERE))
+        import sync
+        sync.refresh_client_fingerprint()
+    except Exception as e:
+        log(f"客户端指纹刷新失败（下次启动可能误报升级）: {e!r}")
 
     res, exe = resolve_install()
     _cleanup_singletons(cur_pid)

@@ -869,13 +869,17 @@ return{success:!0,pending:st.pending,items:st.items||{},stamp:st.stamp,lastError
 '''
 
 # 「退出并应用」handler：确认弹窗后由渲染层调用。顺序即安全边界——
-#   ① 复核 pending（不 pending 拒绝退出）；② 重写看护启动 .cmd（正文与
-#   sync._start_watchdog_task 逐字一致，不带 --want → 看护合并 _watchdog.want）；
-#   ③ schtasks Create/Run（Task Scheduler 启动的进程不在 ZCode 的 Job 里，退出后
-#   才能活着注入；/Delete 只删定义不杀已启动实例）；任何一步失败都原样返回、
-#   绝不退出；④ 200ms 后 app.quit()（先让 IPC 响应回到渲染层），quit 被应用自身
-#   拦截时 5s 后 app.exit(0) 兜底强退。__WDIR__/__PY__/__WDOG__ 由 Python 在注入期
-#   烤入本插件 scripts 目录与解释器路径（看护用真解释器拉起 patcher，值即当下真实值）。
+#   ① 复核 pending（不 pending 拒绝退出）；② 定位看护脚本：优先 sync.py 最新登记的
+#   指针文件 zcode-patches-scripts.json（插件升级后烤入路径会过期，甚至指向开发
+#   仓库副本——0.6.38 实测），失效再退回注入期烤入路径；③ schtasks /Create+/Run，
+#   /TR 直接给出「pythonw + apply_after_exit.py」两个带引号路径——**不落 .cmd 中间
+#   文件**：Task Scheduler 以 UTF-16 存任务，天然避开「cmd.exe 按 ANSI 解析 .cmd、
+#   非 ASCII 安装路径变乱码」的坑（0.6.38 实测：UTF-8 写 .cmd → GBK 解析 → 看护
+#   静默夭折 → 退出后无人注入拉起）；/TR 不带 --want → 看护合并 _watchdog.want；
+#   任何一步失败都原样返回、绝不退出；④ 200ms 后 app.quit()（先让 IPC 响应回到
+#   渲染层），quit 被应用自身拦截时 5s 后 app.exit(0) 兜底强退。
+#   __WDIR__/__PY__/__WDOG__ 由 Python 在注入期烤入本插件 scripts 目录与解释器路径
+#   （仅作指针失效时的兜底）。
 _INJECT_STATUS_APPLY_HANDLER = r'''
 __H__.handle("zcode:apply-patches-now",async(ev,t)=>{
 try{
@@ -887,15 +891,22 @@ let f=r.join(base,".zcode","v2","zcode-patches-status.json");
 let st=null;try{st=JSON.parse(n.readFileSync(f,"utf-8"))}catch(_){st=null}
 if(!st||st.pending!==!0)return{success:!1,code:"not-pending",error:"当前没有待写入的补丁"};
 let wdir=__WDIR__,py=__PY__,wdg=__WDOG__;
-try{n.mkdirSync(wdir,{recursive:!0})}catch(_){}
-let cmd="@echo off\r\nstart \"\" /wait \""+py+"\" \""+wdg+"\"\r\n";
-n.writeFileSync(r.join(wdir,"_watchdog_task.cmd"),cmd);
+try{
+let sp=JSON.parse(n.readFileSync(r.join(base,".zcode","v2","zcode-patches-scripts.json"),"utf-8"));
+if(sp&&sp.scripts_dir&&sp.python){
+let cand=r.join(sp.scripts_dir,"apply_after_exit.py");
+if(n.existsSync(cand)){wdir=sp.scripts_dir;py=sp.python;wdg=cand}
+}}catch(_){}
+let tr='"'+py+'" "'+wdg+'"';
+if(tr.length>250)return{success:!1,code:"schedule-failed",error:"计划任务命令行过长（"+tr.length+" 字符），请反馈日志"};
 let sk=(a)=>c.spawnSync("schtasks",a,{windowsHide:!0,timeout:15000});
-let cr=sk(["/Create","/TN","ZCodePatchApply","/TR",'\"'+r.join(wdir,"_watchdog_task.cmd")+'\"',"/SC","ONCE","/ST","23:59","/F"]);
+let cr=sk(["/Create","/TN","ZCodePatchApply","/TR",tr,"/SC","ONCE","/ST","23:59","/F"]);
+let rn=cr.status===0?sk(["/Run","/TN","ZCodePatchApply"]):null;
+if(cr.status===0&&rn&&rn.status===0)sk(["/Delete","/TN","ZCodePatchApply","/F"]);
+try{n.appendFileSync(r.join(wdir,"_apply_after_exit.log"),
+"["+new Date().toLocaleString()+"] [apply-now] 渲染层触发退出应用: /Create rc="+(cr.status==null?"err":cr.status)+", /Run rc="+(rn?(rn.status==null?"err":rn.status):"skip")+", tr="+tr+"\n")}catch(_){}
 if(cr.status!==0)return{success:!1,code:"schedule-failed",error:"计划任务创建失败: "+String(cr.error&&cr.error.message||cr.stderr||cr.stdout||("exit "+cr.status)).slice(0,200)};
-let rn=sk(["/Run","/TN","ZCodePatchApply"]);
-if(rn.status!==0)return{success:!1,code:"run-failed",error:"计划任务启动失败: "+String(rn.error&&rn.error.message||rn.stderr||rn.stdout||("exit "+rn.status)).slice(0,200)};
-sk(["/Delete","/TN","ZCodePatchApply","/F"]);
+if(!rn||rn.status!==0)return{success:!1,code:"run-failed",error:"计划任务启动失败: "+String(rn&&(rn.error&&rn.error.message||rn.stderr||rn.stdout)||("exit "+(rn&&rn.status))).slice(0,200)};
 try{st.stamp=Date.now();n.writeFileSync(f,JSON.stringify(st))}catch(_){}
 setTimeout(()=>{try{A.quit()}catch(_){}},200);
 setTimeout(()=>{try{A.exit(0)}catch(_){}},5000);

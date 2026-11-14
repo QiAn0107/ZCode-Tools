@@ -1422,8 +1422,15 @@ class TestInjectStatusBlock(unittest.TestCase):
         self.assertIn("node:child_process", code)
         self.assertIn("schtasks", code)
         self.assertIn("ZCodePatchApply", code)
-        self.assertIn("_watchdog_task.cmd", code)
-        self.assertIn("writeFileSync", code, "要重写看护启动 .cmd（绕 /TR 262 字符限制）")
+        # 0.6.39：/TR 直接给「pythonw + 看护脚本」两个带引号路径，**不再落 .cmd
+        # 中间文件**——Task Scheduler 以 UTF-16 存任务，避开「cmd.exe 按 ANSI 解析
+        # .cmd、非 ASCII 安装路径变乱码 → 看护静默夭折」的坑（0.6.38 实测）
+        self.assertIn('"/TR"', code)
+        self.assertIn('"/Create"', code)
+        self.assertIn('"/Run"', code)
+        self.assertNotIn("_watchdog_task.cmd", code,
+                         "不得再写 .cmd 中间文件（ANSI 解析乱码坑）")
+        self.assertIn("writeFileSync", code, "写状态戳仍需写文件")
         self.assertIn("A.quit()", code)
         self.assertIn("A.exit(0)", code, "quit 被应用自身拦截时必须有 5s 强退兜底")
         # 失败路径全部原样返回、绝不退出
@@ -1431,6 +1438,13 @@ class TestInjectStatusBlock(unittest.TestCase):
         self.assertIn("schedule-failed", code)
         self.assertIn("run-failed", code)
         self.assertIn("success:!1", code)
+        # 留痕：/Create、/Run 的结果必须追加进看护日志（0.6.38 的看护静默夭折
+        # 连日志都没有，完全无法定位）
+        self.assertIn("appendFileSync", code)
+        self.assertIn("[apply-now]", code)
+        # 看护脚本定位：优先指针文件，失效退回烤入路径
+        self.assertIn("zcode-patches-scripts.json", code)
+        self.assertIn("existsSync", code)
         for banned in ("sqlite", "fetch(", "httpsMod", "XMLHttpRequest"):
             self.assertNotIn(banned, code, f"apply handler 不得联网: {banned}")
 
@@ -1623,6 +1637,63 @@ class TestPatchStatusFile(unittest.TestCase):
                 data = json.loads((Path(d) / "zcode-patches-status.json").read_text(encoding="utf-8"))
                 self.assertFalse(data["pending"])
                 self.assertNotIn("last_error", data)
+            finally:
+                zp._v2_root = orig
+
+    def test_write_scripts_pointer(self):
+        """渲染层 apply-now 据此定位**当前**副本的看护脚本：烤入路径在插件升级后
+        会过期（0.6.38 实测甚至指向开发仓库，叠加 .cmd 编码问题导致看护静默夭折）。"""
+        import sync
+        import tps_snapshot
+        with tempfile.TemporaryDirectory() as d:
+            orig = tps_snapshot.resolve_v2_root
+            tps_snapshot.resolve_v2_root = lambda: Path(d)
+            try:
+                sync.write_scripts_pointer()
+                data = json.loads((Path(d) / "zcode-patches-scripts.json").read_text(encoding="utf-8"))
+                self.assertTrue(data["scripts_dir"].replace("/", "\\").endswith("scripts"))
+                self.assertIn("python", data)
+            finally:
+                tps_snapshot.resolve_v2_root = orig
+
+    def test_refresh_client_fingerprint_writes_file(self):
+        """看护应用后必须刷新指纹：重打包改了 asar 尺寸，不刷新会被 detect_upgrade
+        误判成客户端升级，弹「已升级，重新排期」的假通知（0.6.38 实测）。"""
+        import sync
+        with tempfile.TemporaryDirectory() as d:
+            orig_fp = sync.CLIENT_FINGERPRINT
+            orig_get = sync.get_client_fingerprint
+            sync.CLIENT_FINGERPRINT = Path(d) / "_client_fingerprint.json"
+            sync.get_client_fingerprint = lambda: {"asar_path": "X", "version": "9.9.9",
+                                                   "size": 1, "mtime": 2}
+            try:
+                fp = sync.refresh_client_fingerprint()
+                self.assertEqual(fp["version"], "9.9.9")
+                data = json.loads(sync.CLIENT_FINGERPRINT.read_text(encoding="utf-8"))
+                self.assertEqual(data["size"], 1)
+            finally:
+                sync.CLIENT_FINGERPRINT = orig_fp
+                sync.get_client_fingerprint = orig_get
+
+    def test_shared_watchdog_lock(self):
+        """跨版本共享单例锁：插件升级前后两个版本的看护可能同时等待，各查各的
+        副本级 pid 会双双放行 → 退出后并发重打包同一个 asar。共享锁保证
+        「全机同时只有一个看护」。"""
+        import apply_after_exit as aae
+        with tempfile.TemporaryDirectory() as d:
+            orig = zp._v2_root
+            zp._v2_root = lambda override=None: Path(d)
+            try:
+                probe = os.getpid() + 10 ** 6      # 一定不是自己的 PID
+                self.assertEqual(aae._shared_watchdog_alive(probe), 0, "无锁文件 → 0")
+                sp = Path(d) / "zcode-watchdog.pid"
+                sp.write_text(str(os.getpid()), encoding="utf-8")   # 本测试进程活着
+                self.assertEqual(aae._shared_watchdog_alive(probe), os.getpid(),
+                                 "锁里有活看护 → 返回其 PID")
+                self.assertEqual(aae._shared_watchdog_alive(os.getpid()), 0,
+                                 "锁里是自己 → 0")
+                sp.write_text("999999999", encoding="utf-8")
+                self.assertEqual(aae._shared_watchdog_alive(probe), 0, "死 PID → 0")
             finally:
                 zp._v2_root = orig
 
@@ -2047,18 +2118,20 @@ class TestSyncModes(unittest.TestCase):
     def setUp(self):
         import sync
         self.sync = sync
-        self._orig = (sync.CONFIG, sync.STAMP, sync.LOG, sync.MARKER, list(sys.argv))
+        self._orig = (sync.CONFIG, sync.STAMP, sync.LOG, sync.MARKER,
+                      sync.CLIENT_FINGERPRINT, list(sys.argv))
         self._tmp = tempfile.TemporaryDirectory(prefix="zpatch-mode-", ignore_cleanup_errors=True)
         d = Path(self._tmp.name)
         sync.CONFIG = d / "config.json"       # 故意不存在
         sync.STAMP = d / "_sync.last"
         sync.LOG = d / "_sync.log"
         sync.MARKER = d / "_autoinject.done"  # 别把标记写进真实安装目录
+        sync.CLIENT_FINGERPRINT = d / "_client_fingerprint.json"  # 指纹同理（--detach 会写）
 
     def tearDown(self):
         (self.sync.CONFIG, self.sync.STAMP, self.sync.LOG,
-         self.sync.MARKER) = self._orig[:4]
-        sys.argv[:] = self._orig[4]
+         self.sync.MARKER, self.sync.CLIENT_FINGERPRINT) = self._orig[:5]
+        sys.argv[:] = self._orig[5]
         self._tmp.cleanup()
 
     def _run(self, *args):
@@ -2078,7 +2151,12 @@ class TestSyncModes(unittest.TestCase):
         self.assertIn("[钩子]", self.sync.STAMP.read_text(encoding="utf-8"))
 
     def test_detach_falls_back_to_foreground_when_spawn_fails(self):
-        """后台起不来（比如被安全软件拦）时必须自己把活干完，而不是静默失败。"""
+        """后台起不来（比如被安全软件拦）时必须自己把活干完，而不是静默失败。
+
+        ★ 0.6.39 修复：本测试曾**不打桩**跑真 run_sync —— 真 check_state 子进程 +
+        真 start_watchdog（真 schtasks）直接把开发树的看护武装到了用户机器上
+        （实测 10:33:59 泄漏的看护在 10:42:24 用开发树给用户客户端打了 4 个补丁）。
+        桩补丁下本测试的语义不变：run_sync 照跑、心跳照写。"""
         orig = self.sync.spawn_detached
         self.sync.spawn_detached = lambda extra: False
         try:
