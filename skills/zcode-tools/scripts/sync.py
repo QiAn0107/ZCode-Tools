@@ -63,7 +63,6 @@ CLIENT_FINGERPRINT = HERE / "_client_fingerprint.json"
 
 # 配置键 -> (zcode_patcher.py 参数, 是否重打包级)
 PATCHES = [
-    ("usage_chart", ["--usage-chart"], False),
     ("tps_footer", ["--tps-footer"], True),
     ("enhance_prompt", ["--enhance-prompt"], True),
     ("model_puller", ["--model-puller"], True),
@@ -681,8 +680,8 @@ def build_notice(is_upgrade: bool = False, version: str = "") -> str:
         )
     return (
         f"{NOTICE_HEAD}。本次会话启动时已在后台开始同步：\n"
-        "· 八项补丁（思考档位配置、用量页去截断、模型弹窗加宽、TPS 状态栏、思考强度滑条、"
-        "增强提示词、模型拉取按钮）都要等你**完全退出 ZCode**（托盘图标右键 → 退出）时才会写入 ——\n"
+        "· 三项增强补丁（TPS 状态栏、增强提示词、模型拉取按钮）都要等你**完全退出 ZCode**"
+        "（托盘图标右键 → 退出）时才会写入 ——\n"
         "  客户端运行期间会拒绝改写 app.asar 与 provider_config.json；退出后由看护写入，"
         "并自动把 ZCode 重新拉起来，再启动即可见。\n"
         "这一条只在首次自动注入时出现。想核对结果可以运行（只读，可选）：\n"

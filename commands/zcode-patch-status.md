@@ -11,7 +11,6 @@ python "<skill目录>/scripts/zcode_patcher.py" --all --check
 或者逐项检查：
 
 ```bash
-python "<skill目录>/scripts/zcode_patcher.py" --usage-chart --check
 python "<skill目录>/scripts/zcode_patcher.py" --tps-footer --check
 python "<skill目录>/scripts/zcode_patcher.py" --enhance-prompt --check
 python "<skill目录>/scripts/zcode_patcher.py" --model-puller --check

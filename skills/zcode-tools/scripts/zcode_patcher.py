@@ -5,16 +5,7 @@ ZCode 客户端补丁工具
 
 对本地 ZCode 安装打补丁（均自动探测安装位置、独立备份、幂等）：
 
-一、用量页去截断（app.asar，--usage-chart）
-  设置→用量 的趋势图只画 Top6 模型、饼图只画 Top5 并把其余合并为「其他模型」。
-  补丁解析 asar 头定位渲染文件，把截断表达式替换为全量版本，
-  空格补齐到原字节长度后原地覆盖（asar 头/offset/unpacked 零改动）。
-  原始字节备份在 app.asar.chart-patch.json，可整体还原。
-
-二、模型选择弹窗加宽（app.asar，--model-width）
-  模型选择下拉浮窗 192px 扩大至 320px，长模型名完整展示不再被截断。
-
-三、TPS 统计栏（app.asar，--tps-footer）
+一、TPS 统计栏（app.asar，--tps-footer）
   向渲染层 out/renderer/index.html 注入 zcode-tps.js（读 ServicePort 事件流得精确
   tok/s/首 token/会话累计/今日总耗；脚本内不调用 port.start()，否则 3.12.2 会卡启动）：
   输入框下方常驻统计条（默认位置），左组=即时指标（首 token/tok/s）、
@@ -26,7 +17,7 @@ ZCode 客户端补丁工具
   重打包级修改：整体重排 asar 目录、对改动文件重算 integrity。
   原件备份 app.asar.tps.bak（带指纹 meta），记录在 app.asar.tps-patch.json，可整体还原。
 
-四、模型拉取按钮（app.asar，--model-puller）
+二、模型拉取按钮（app.asar，--model-puller）
   设置页注入「⚡️ 自动拉取模型」按钮：拉取供应商 /models 接口 → 弹窗勾选 → 写入
   config.json（整读整写、已有条目原样保留）。
   四处改动：out/renderer/ 新增 zcode-model-puller.js + index.html 挂载 +
@@ -37,7 +28,7 @@ ZCode 客户端补丁工具
   原件备份 app.asar.puller.bak，记录在 app.asar.puller-patch.json，可整体还原。
   另有命令行版 scripts/model_pull.py：不动 asar，直接同步 config.json。
 
-五、增强提示词（app.asar，--enhance-prompt）
+三、增强提示词（app.asar，--enhance-prompt）
   在输入框工具栏注入「增强提示词」按钮：取当前草稿 → 经 preload 桥 / main handler 用
   选定的模型调一次对话补全 → 写回输入框，按钮临时变「恢复原文」可一键还原。
   在按钮上右键弹出模型选择菜单（按供应商分组，只列可用模型）：选中即写进
@@ -55,8 +46,6 @@ ZCode 客户端补丁工具
   python zcode_patcher.py --all --check         # 【推荐第一步】一条命令体检全部功能，只读不改
   python zcode_patcher.py --all                 # 一次打上全部补丁（先完全退出 ZCode）
   python zcode_patcher.py --all --revert        # 一次还原全部补丁
-  python zcode_patcher.py --usage-chart         # 用量页去截断（同样支持 --check/--revert）
-  python zcode_patcher.py --model-width         # 模型弹窗加宽（同样支持 --check/--revert）
   python zcode_patcher.py --tps-footer          # TPS 统计栏注入（同样支持 --check/--revert）
   python zcode_patcher.py --model-puller        # 模型拉取按钮注入（同样支持 --check/--revert）
   python zcode_patcher.py --enhance-prompt      # 增强提示词按钮注入（同样支持 --check/--revert）
@@ -96,7 +85,6 @@ except ImportError:                    # 被别处 import 时脚本目录可能�
 
 # 全部补丁的命令行参数名：--all 会一次性把它们打开（新增补丁时只需加进这里）
 ALL_PATCH_FLAGS = (
-    "usage_chart",
     "tps_footer",
     "model_puller",
     "enhance_prompt",
@@ -387,66 +375,6 @@ def resolve_target(arg: str | None) -> list[Path]:
     raise SystemExit(f"[!] 指定路径下找不到 zcode.cjs：{arg}")
 
 
-# ------------------------------------------------------- 用量页去截断补丁（asar 内同长度原地改字节）
-
-# 每项：key=定位用的文件名特征，pattern=截断表达式原文，replacement=等价短替换（空格补齐）
-USAGE_PATCHES = [
-    {
-        "key": "AppUsageDailyModelTrendChart",
-        "pattern": b"n.models.slice(0,6)",
-        "replacement": b"n.models",
-        "regex": rb"([a-zA-Z_$][a-zA-Z0-9_$]*)\.models\.slice\(0,\s*6\)",
-        "regex_replacement": lambda m: m.group(1) + b".models",
-        "desc": "每日趋势图：去掉 Top6 截断，全部模型出线",
-    },
-    {
-        "key": "AppUsageModelUsagePieChart",
-        "pattern": b"i=n.length>Q,a=i?Q-1:Q",
-        "replacement": b"i=!1,a=1/0",
-        "regex": rb"([a-zA-Z_$][a-zA-Z0-9_$]*)=([a-zA-Z_$][a-zA-Z0-9_$]*)\.length>([a-zA-Z_$][a-zA-Z0-9_$]*),([a-zA-Z_$][a-zA-Z0-9_$]*)=\1\?\3-1:\3",
-        "regex_replacement": lambda m: m.group(1) + b"=!1," + m.group(4) + b"=1/0",
-        "desc": "模型用量饼图：去掉 Top5+其他模型 合并，全部模型出块",
-    },
-]
-
-
-def _asar_header_index(asar: Path):
-    """解析 asar 头，返回 [(文件路径, 绝对偏移, 尺寸), ...]。"""
-    with open(asar, "rb") as f:
-        head = f.read(16)
-        header_size = struct.unpack("<I", head[4:8])[0]
-        json_len = struct.unpack("<I", head[12:16])[0]
-        f.seek(16)
-        header = json.loads(f.read(json_len).decode("utf-8"))
-
-    def walk(node, path):
-        for name, ent in (node.get("files") or {}).items():
-            p = f"{path}/{name}" if path else name
-            if "files" in ent:
-                yield from walk(ent, p)
-            else:
-                yield p, ent
-
-    data_start = 8 + header_size
-    return [(p, data_start + int(e["offset"]), e["size"])
-            for p, e in walk(header, "") if not e.get("unpacked")]
-
-
-def _load_sidecar(side: Path, asar_size: int | None = None) -> list[dict]:
-    """读取补丁记录；兼容旧的单条格式。带 asar_size 指纹校验：
-    ZCode 升级会整个覆盖 app.asar，旧记录的 offset 不再可信，失配即作废。"""
-    if not side.is_file():
-        return []
-    data = json.loads(side.read_text(encoding="utf-8"))
-    if isinstance(data, dict) and "patches" in data:
-        data = data["patches"]
-    elif isinstance(data, dict):
-        data = [data]
-    if asar_size is not None:
-        data = [r for r in data if r.get("asar_size") == asar_size]
-    return data
-
-
 def _asar_find_entry(header: dict, entry_path: str) -> dict | None:
     node = header
     for part in entry_path.split("/"):
@@ -455,270 +383,6 @@ def _asar_find_entry(header: dict, entry_path: str) -> dict | None:
             return None
         node = files[part]
     return node
-
-
-def _asar_sync_integrity(asar: Path, entry_path: str, new_bytes: bytes, *,
-                         dry_run: bool = False) -> None:
-    """同长度原地交换 asar 头里该条目的 integrity 记录，使记录与内容一致。
-    sha256 hex 定长（64），头部长度与全部 offset 零改动，保持零重打包特性。
-    实现要点：**只替换「该条目自己的 integrity 对象」那一段文本**——早期版本按哈希字符串
-    全局查找替换，当同一哈希串在头部出现两次（≤4MB 文件的整文件哈希 == 唯一块哈希，或
-    另一个内容完全相同的条目）时会误改到别的条目，此处改为整对象唯一定位。"""
-    with open(asar, "rb") as f:
-        head = f.read(16)
-        json_len = struct.unpack("<I", head[12:16])[0]
-        f.seek(16)
-        hdr = f.read(json_len)
-    ent = _asar_find_entry(json.loads(hdr.decode("utf-8")), entry_path)
-    itg = (ent or {}).get("integrity")
-    if not itg:
-        return
-    new_itg = _asar_integrity(new_bytes)
-    if itg == new_itg:
-        return
-    if len(itg.get("blocks") or []) != len(new_itg["blocks"]):
-        print(f"    [!] {entry_path} 的分块数变化，跳过 integrity 同步")
-        return
-    old_text = json.dumps(itg, separators=(",", ":")).encode()
-    new_text = json.dumps(new_itg, separators=(",", ":")).encode()
-    if len(old_text) != len(new_text):
-        print(f"    [!] {entry_path} 的 integrity 段长度变化，跳过同步")
-        return
-
-    # 定位方式①（首选）：用条目自己的 size/offset 前缀锚定，再核对紧随其后的对象文本。
-    # offset 唯一，因此这对锚点在整个头部里唯一，同内容条目也不会互相误伤。
-    pos = -1
-    try:
-        prefix = f'"size":{int(ent["size"])},"offset":"{ent["offset"]}","integrity":'.encode()
-        if hdr.count(prefix) == 1:
-            start = hdr.find(prefix) + len(prefix)
-            if hdr[start:start + len(old_text)] == old_text:
-                pos = start
-    except (KeyError, TypeError, ValueError):
-        pass
-    # 定位方式②（兜底）：整段对象文本在头部唯一
-    if pos < 0 and hdr.count(old_text) == 1:
-        pos = hdr.find(old_text)
-    if pos < 0:
-        print(f"    [!] {entry_path} 的 integrity 段无法唯一定位，跳过同步（内容已改、记录未同步）")
-        return
-    if dry_run:
-        print(f"    [~] 将同步 {entry_path} 的 integrity 记录")
-        return
-    with open(asar, "r+b") as f:
-        f.seek(16 + pos)
-        f.write(new_text)
-
-
-def process_usage_chart(asar: Path, check_only: bool, revert: bool, *,
-                        dry_run: bool = False) -> bool:
-    """用量页去截断。返回 True=成功/无需改动，False=失败。"""
-    side = asar.with_name(asar.name + ".chart-patch.json")
-    try:
-        asar_size = asar.stat().st_size
-        entries = _asar_header_index(asar)
-    except OSError as e:
-        print(f"[!] 无法读取 {asar}：{e}")
-        return False
-
-    specs = []
-    for item in USAGE_PATCHES:
-        match = [(p, o, s) for p, o, s in entries if item["key"] in p]
-        if len(match) != 1:
-            print(f"[!] {asar}\n    {item['key']} 命中 {len(match)} 个文件（期望 1），该项跳过")
-            continue
-        specs.append((item, match[0]))
-
-    try:
-        if revert:
-            saved = _load_sidecar(side, asar_size)
-            if not saved:
-                print(f"[.] {asar}\n    没有当前版本的 sidecar 备份，跳过")
-                return True
-            if dry_run:
-                print(f"[~] {asar}\n    将还原 {len(saved)} 处原始字节")
-                return True
-            with open(asar, "r+b") as f:
-                for rec in saved:
-                    f.seek(rec["offset"])
-                    f.write(base64.b64decode(rec["original_b64"]))
-            for rec in saved:
-                _asar_sync_integrity(asar, rec["path"], base64.b64decode(rec["original_b64"]))
-            side.unlink()
-            print(f"[+] {asar}\n    已还原 {len(saved)} 处原始字节")
-            return True
-
-        print(f"[*] {asar}")
-        saved = _load_sidecar(side, asar_size)
-        changed = False
-        for item, (path, off, size) in specs:
-            fname = path.split("/")[-1]
-            with open(asar, "r+b") as f:
-                f.seek(off)
-                raw = f.read(size)
-            pat = item["pattern"]
-            rep = item["replacement"]
-            if pat not in raw and "regex" in item:
-                m = re.search(item["regex"], raw)
-                if m:
-                    pat = m.group(0)
-                    rep = item["regex_replacement"](m)
-            if pat not in raw:
-                print(f"    [=] {fname} | 已打（{item['desc']}）")
-                if not check_only:
-                    _asar_sync_integrity(asar, path, raw, dry_run=dry_run)
-                continue
-            cnt = raw.count(pat)
-            if cnt != 1:
-                print(f"    [!] {fname} | 截断表达式出现 {cnt} 次（期望 1），拒绝盲改")
-                continue
-            if check_only:
-                print(f"    [ ] {fname} | 未打（{item['desc']}）")
-                continue
-            new = raw.replace(pat, rep, 1)
-            padded = new + b" " * (len(raw) - len(new))   # 同长度原地覆盖，asar 头零改动
-            if dry_run:
-                print(f"    [~] {fname} | 将替换 {pat.decode()}（{item['desc']}）")
-                changed = True
-                continue
-            if not any(r.get("offset") == off for r in saved):
-                saved.append({
-                    "path": path,
-                    "offset": off,
-                    "size": size,
-                    "asar_size": asar_size,
-                    "original_b64": base64.b64encode(raw).decode(),
-                })
-            with open(asar, "r+b") as f:
-                f.seek(off)
-                f.write(padded)
-                f.seek(off)
-                back = f.read(size)
-            ok = item["pattern"] not in back and len(back) == size
-            if ok:
-                _asar_sync_integrity(asar, path, padded)
-            print(f"    [{'+' if ok else '!'}] {fname} | {'写入成功（' + item['desc'] + '）' if ok else '写入失败'}")
-            changed = True
-        if changed and not check_only and not dry_run:
-            side.write_text(json.dumps({"patches": saved}, ensure_ascii=False), encoding="utf-8")
-            print(f"    原始字节备份: {side.name}")
-        return True
-    except OSError as e:
-        print(f"[!] {asar}\n    文件被占用或无写入权限：{e}\n"
-              f"    请完全退出 ZCode 后重试（Program Files 下需管理员终端）")
-        return False
-
-
-    try:
-        if revert:
-            saved = _load_sidecar(side, asar_size)
-            if not saved:
-                print(f"[.] {asar}\n    没有当前版本的 sidecar 备份，跳过")
-                return True
-            if dry_run:
-                print(f"[~] {asar}\n    将还原 {len(saved)} 处原始宽度字节")
-                return True
-            with open(asar, "r+b") as f:
-                for rec in saved:
-                    f.seek(rec["offset"])
-                    f.write(base64.b64decode(rec["original_b64"]))
-            for rec in saved:
-                _asar_sync_integrity(asar, rec["path"], base64.b64decode(rec["original_b64"]))
-            side.unlink()
-            print(f"[+] {asar}\n    已还原 {len(saved)} 处原始宽度字节")
-            return True
-
-        entries = _asar_header_index(asar)
-        print(f"[*] {asar}")
-        saved = _load_sidecar(side, asar_size)
-        changed = False
-
-        for item in WIDTH_PATCHES:
-            if item["key"] is not None:
-                cands = [(p, o, s) for p, o, s in entries if item["key"] in p]
-            else:
-                cands = [(p, o, s) for p, o, s in entries
-                         if p.startswith("out/renderer/") and p.endswith(".js")
-                         and s and 1000 < s < 80_000_000]
-
-            def _scan(needle: bytes):
-                got = []
-                for p, o, s in cands:
-                    with open(asar, "rb") as f:
-                        f.seek(o)
-                        raw = f.read(s)
-                    cnt = raw.count(needle)
-                    if cnt:
-                        got.append((p, o, s, raw, cnt))
-                return got
-
-            hits = _scan(item["pattern"])
-            if not hits:
-                # 未命中可能是「已打」（锚点已被替换掉）——用替换后形态确认
-                done = _scan(item["replacement"])
-                if len(done) == 1 and done[0][4] == 1:
-                    print(f"    [=] {done[0][0].split('/')[-1]} | 已打（{item['desc']}）")
-                    if not check_only:
-                        _asar_sync_integrity(asar, done[0][0], done[0][3], dry_run=dry_run)
-                    continue
-                # 或「上游已修」：3.14 起该浮窗分支改为按内容自适应宽度，长名不再截断
-                if item.get("upstream_fixed"):
-                    up = _scan(item["upstream_fixed"])
-                    if len(up) == 1 and up[0][4] == 1:
-                        print(f"    [=] {up[0][0].split('/')[-1]} | 上游已改为自适应宽度，无需补丁"
-                              f"（{item['desc']}）")
-                        continue
-                if item.get("optional"):
-                    print(f"    [.] {item['desc']} | 本版本无此补丁点（可选），跳过")
-                    continue
-                print(f"    [!] {item['desc']} | 未找到锚点（版本结构可能已变），跳过")
-                continue
-            if len(hits) > 1:
-                print(f"    [!] {item['desc']} | 锚点在 {len(hits)} 个文件中出现（期望 1），拒绝盲改")
-                continue
-            path, off, size, raw, cnt = hits[0]
-            fname = path.split("/")[-1]
-            if cnt != 1:
-                print(f"    [!] {fname} | {item['desc']}：锚点出现 {cnt} 次（期望 1），拒绝盲改")
-                continue
-
-            new = raw.replace(item["pattern"], item["replacement"], 1)
-            if len(new) != len(raw):
-                print(f"    [!] {fname} | 替换不等长（{len(raw)}→{len(new)}），拒绝改写")
-                continue
-            padded = new   # 等长，无需补齐
-            if check_only:
-                print(f"    [ ] {fname} | 未打（{item['desc']}）")
-                continue
-            if dry_run:
-                print(f"    [~] {fname} | 将替换 {item['pattern'].decode()} → "
-                      f"{item['replacement'].decode()}（{item['desc']}）")
-                changed = True
-                continue
-            if not any(r.get("offset") == off for r in saved):
-                saved.append({
-                    "path": path, "offset": off, "size": size,
-                    "asar_size": asar_size, "original_b64": base64.b64encode(raw).decode(),
-                })
-            with open(asar, "r+b") as f:
-                f.seek(off)
-                f.write(padded)
-                f.seek(off)
-                back = f.read(size)
-            ok = item["pattern"] not in back and len(back) == size
-            if ok:
-                _asar_sync_integrity(asar, path, padded)
-            print(f"    [{'+' if ok else '!'}] {fname} | {'写入成功（' + item['desc'] + '）' if ok else '写入失败'}")
-            changed = True
-
-        if changed and not check_only and not dry_run:
-            side.write_text(json.dumps({"patches": saved}, ensure_ascii=False), encoding="utf-8")
-            print(f"    原始字节备份: {side.name}")
-        return True
-    except OSError as e:
-        print(f"[!] {asar}\n    文件被占用或无写入权限：{e}\n"
-              f"    请完全退出 ZCode 后重试（Program Files 下需管理员终端）")
-        return False
 
 
 # ------------------------------------------------- TPS 统计栏注入（asar 重打包级）
@@ -1992,17 +1656,15 @@ def _cleanup_stale_tmp(folder: Path) -> None:
                 pass
 
 
-def _refresh_chart_sidecar(asar: Path) -> None:
-    """asar 重打包后数据区整体位移：字节级补丁（chart/width）记录里的绝对 offset 与
-    asar_size 指纹都要重定位；重打包级补丁（tps/slider/puller）的 sidecar 只记 asar_size，
-    也必须跟着更新——否则后续 `--check` 会把 sidecar 报成「无」，看着像记录丢了。"""
-    for suffix in (".chart-patch.json", ".width-patch.json"):
-        _relocate_sidecar(asar, suffix)
+def _refresh_repack_sidecars(asar: Path) -> None:
+    """asar 重打包后整文件尺寸变化：重打包级补丁（tps/puller/enhance）的 sidecar 只记
+    asar_size 指纹，必须跟着更新——否则后续 `--check` 会把 sidecar 报成「无」，
+    看着像记录丢了。"""
     try:
         cur_size = asar.stat().st_size
     except OSError:
         return
-    for suffix in (".tps-patch.json", ".slider-patch.json", ".puller-patch.json"):
+    for suffix in (".tps-patch.json", ".puller-patch.json", ".enhance-patch.json"):
         side = asar.with_name(asar.name + suffix)
         if not side.is_file():
             continue
@@ -2017,29 +1679,6 @@ def _refresh_chart_sidecar(asar: Path) -> None:
                 print(f"[*] 已同步 {side.name} 的指纹到重打包后的 asar")
             except OSError:
                 pass
-
-
-def _relocate_sidecar(asar: Path, suffix: str) -> None:
-    side = asar.with_name(asar.name + suffix)
-    if not side.is_file():
-        return
-    try:
-        recs = json.loads(side.read_text(encoding="utf-8")).get("patches", [])
-    except Exception:
-        return
-    if not recs:
-        return
-    entries = {p: (o, s) for p, o, s in _asar_header_index(asar)}
-    cur_size = asar.stat().st_size
-    changed = False
-    for r in recs:
-        hit = entries.get(r.get("path"))
-        if hit and hit[1] == r.get("size") and (r.get("offset") != hit[0] or r.get("asar_size") != cur_size):
-            r["offset"], r["asar_size"] = hit[0], cur_size
-            changed = True
-    if changed:
-        side.write_text(json.dumps({"patches": recs}, ensure_ascii=False), encoding="utf-8")
-        print(f"[*] 已同步 {side.name} 的 offset/指纹到重打包后的 asar")
 
 
 def _mark_backup_patched(backup: Path, current: Path) -> None:
@@ -2132,7 +1771,7 @@ def _process_script_inject(asar: Path, check_only: bool, revert: bool, src_path:
         side.unlink(missing_ok=True)
         bak.unlink(missing_ok=True)
         _backup_meta(bak).unlink(missing_ok=True)
-        _refresh_chart_sidecar(asar)
+        _refresh_repack_sidecars(asar)
         print(f"[+] {asar}\n    已移除{label}注入（新大小 {new_size:,} 字节，备份已清理）")
         return True
 
@@ -2156,7 +1795,7 @@ def _process_script_inject(asar: Path, check_only: bool, revert: bool, src_path:
         except OSError as e:
             print(f"[!] {asar}\n    文件被占用或无写入权限：{e}\n    请完全退出 ZCode 后重试")
             return False
-        _refresh_chart_sidecar(asar)
+        _refresh_repack_sidecars(asar)
         print(f"[+] {asar}\n    {label}脚本已热更新（{src_path.name} {len(script_bytes):,} 字节，其余组件不变）")
         return True
 
@@ -2184,7 +1823,7 @@ def _process_script_inject(asar: Path, check_only: bool, revert: bool, src_path:
         "script_entry": script_entry,
         "index_original_b64": base64.b64encode(idx_bytes).decode(),
     }, ensure_ascii=False), encoding="utf-8")
-    _refresh_chart_sidecar(asar)
+    _refresh_repack_sidecars(asar)
     print(f"[+] {asar}\n    {label}注入完成（{src_path.name} {len(script_bytes):,} 字节 -> {script_entry}，index.html 已挂载）\n"
           f"    原件备份: {bak.name} | 记录: {side.name}")
     return True
@@ -2343,7 +1982,7 @@ def _process_ipc_patch(asar: Path, check_only: bool, revert: bool, src_path: Pat
         side.unlink(missing_ok=True)
         bak.unlink(missing_ok=True)
         _backup_meta(bak).unlink(missing_ok=True)
-        _refresh_chart_sidecar(asar)
+        _refresh_repack_sidecars(asar)
         print(f"[+] {asar}\n    已还原{label}注入（新大小 {new_size:,} 字节，备份已清理）")
         return True
 
@@ -2419,7 +2058,7 @@ def _process_ipc_patch(asar: Path, check_only: bool, revert: bool, src_path: Pat
         "main_path": PULLER_MAIN_PATH,
     })
     side.write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
-    _refresh_chart_sidecar(asar)
+    _refresh_repack_sidecars(asar)
     done = "+".join(k for k, v in (("renderer", True), ("index", TPS_INDEX_PATH in overwrite),
                                    ("preload", PULLER_PRELOAD_PATH in overwrite),
                                    ("main", PULLER_MAIN_PATH in overwrite)) if v)
@@ -2470,7 +2109,8 @@ def _auto_prune_stale(asar: Path) -> None:
         folder = asar.parent
         for pat in (f"{asar.name}*.stale-*", f"{asar.name}*.tps-tmp", f"{asar.name}.*.tmp",
                     f"{asar.name}.slider.*", f"{asar.name}*.slider-patch.json",
-                    f"{asar.name}*.width-patch.json"):
+                    f"{asar.name}*.width-patch.json",
+                    f"{asar.name}*.chart-patch.json"):
             for p in folder.glob(pat):
                 if p.is_file():
                     try:
@@ -2499,7 +2139,8 @@ def prune_artifacts(asars: list[Path], deep: bool, dry_run: bool = False) -> int
         folder = asar.parent
         collect(folder, (f"{asar.name}*.stale-*", f"{asar.name}*.tps-tmp", f"{asar.name}.*.tmp",
                          f"{asar.name}.slider.*", f"{asar.name}*.slider-patch.json",
-                         f"{asar.name}*.width-patch.json"))
+                         f"{asar.name}*.width-patch.json",
+                         f"{asar.name}*.chart-patch.json"))
         if deep:
             collect(folder, (f"{asar.name}*.bak", f"{asar.name}*.bak.meta.json",
                              f"{asar.name}*-patch.json"))
@@ -2602,8 +2243,8 @@ def zcode_running() -> bool:
 def main() -> int:
     safe_stdio()          # 输出被重定向时 cp936 会编不出 ✓/✗，先把这条路封死
     ap = argparse.ArgumentParser(
-        description="ZCode 客户端补丁工具：用量页去截断 + TPS 统计栏 "
-                    "+ 模型拉取按钮 + 增强提示词按钮（自动探测安装位置）")
+        description="ZCode 客户端补丁工具：TPS 统计栏 + 模型拉取按钮 "
+                    "+ 增强提示词按钮（自动探测安装位置）")
     ap.add_argument("target", nargs="?", help="可选：安装根目录或 zcode.cjs 路径；缺省自动探测全部")
     mode_g = ap.add_mutually_exclusive_group()
     mode_g.add_argument("--check", action="store_true", help="只检查状态，不修改")
@@ -2616,8 +2257,6 @@ def main() -> int:
                     help="对所有功能生效（等价于同时给出全部补丁参数）："
                          "`--all --check` 一条命令体检全部功能，`--all` 全部打上，"
                          "`--all --revert` 全部还原")
-    ap.add_argument("--usage-chart", action="store_true",
-                    help="补丁用量页：去掉趋势图 Top6 与饼图 Top5+其他模型 的截断，全部模型展示")
     ap.add_argument("--tps-footer", action="store_true",
                     help="注入 TPS 统计栏：输入框下方常驻统计条（本轮指标 + 会话累计），asar 重打包级")
     ap.add_argument("--tps-src", default=None,
@@ -2658,8 +2297,7 @@ def main() -> int:
             return 1
         return 0
 
-    asar_flags = any((args.usage_chart, args.tps_footer,
-                      args.model_puller, args.enhance_prompt))
+    asar_flags = any((args.tps_footer, args.model_puller, args.enhance_prompt))
     if not asar_flags:
         ap.print_help()
         return 0
@@ -2700,8 +2338,6 @@ def main() -> int:
     print(f"=== 客户端版本 {version or '未知'} | 目标 {len(asars)} 处 | 模式：{mode} ===")
 
     steps = [
-        (args.usage_chart, "用量页去截断补丁",
-         lambda a: process_usage_chart(a, args.check, args.revert, dry_run=args.dry_run)),
         (args.tps_footer, "TPS 统计栏注入",
          lambda a: process_tps_footer(a, args.check, args.revert,
                                       Path(args.tps_src) if args.tps_src else None,

@@ -1,13 +1,13 @@
 ---
 name: zcode-tools
-description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁注入工具：①用量页去截断（趋势图/饼图全量）②模型弹窗加宽 ③TPS 状态栏（输入框统计条：本轮指标+会话累计）④增强提示词按钮（一键润色输入框草稿，右键可选润色所用模型）⑤设置页一键模型拉取按钮。全部幂等、可 --check、可 --revert 精确还原。只有当用户明确要求执行本 skill、或明确点名「zcode-tools」时才加载；用户只是泛泛提到用量图、状态栏、补丁等话题时，一律不要自动触发本 skill。"
+description: "[仅手动调用，禁止自动触发] ZCode 客户端本地补丁注入工具：①TPS 状态栏（输入框统计条：本轮指标+会话累计）②增强提示词按钮（一键润色输入框草稿，右键可选润色所用模型）③设置页一键模型拉取按钮。全部幂等、可 --check、可 --revert 精确还原。只有当用户明确要求执行本 skill、或明确点名「zcode-tools」时才加载；用户只是泛泛提到状态栏、补丁等话题时，一律不要自动触发本 skill。"
 ---
 
 # ZCode 客户端补丁工具
 
 > 本 skill 由 **zcode-tools 插件**提供，脚本就在本 skill 目录下的 `scripts/`（下文所有 `<skill目录>` 均指本目录）。
 
-**先跑这一条**（只读，不改任何文件，一条命令看全部 5 项功能的状态）：
+**先跑这一条**（只读，不改任何文件，一条命令看全部 3 项功能的状态）：
 
 ```bash
 python "<skill目录>/scripts/zcode_patcher.py" --all --check
@@ -37,7 +37,8 @@ python "<skill目录>/scripts/doctor.py" --where  # 只查「插件装在哪」+
 界面上的表现都一样是「什么也没发生」。**最常见的卡点是「插件没启用」**。
 钩子是否真的执行过，看 `scripts/_sync.last` 心跳文件；不存在 = 钩子从未被调用。
 
-> **装完即用，不需要打开配置页。** 插件清单里 5 个开关的 `default` 全是 `true`，没保存过配置时> `sync.py` 就按这份默认值注入。ZCode 的插件清单**没有「安装时钩子」**——官方规范
+> **装完即用，不需要打开配置页。** 插件清单里 3 个开关的 `default` 全是 `true`，没保存过配置时
+> `sync.py` 就按这份默认值注入。ZCode 的插件清单**没有「安装时钩子」**——官方规范
 > `plugin-json-spec.md` 原文只允许声明 `skills` / `commands` / `hooks` / `mcpServers`
 > 四类组件（「Optional components: `skills` and `commands` point to directories; `hooks` points to
 > `hooks/hooks.json`; `mcpServers` can point to `.mcp.json` or contain the server configuration」），
@@ -50,15 +51,12 @@ python "<skill目录>/scripts/doctor.py" --where  # 只查「插件装在哪」+
 
 | 补丁 | 3.11.2 及更早 | 3.14.x ~ 3.15.x（实测 3.14.1 / 3.14.3 / 3.15.1） |
 |---|---|---|
-| ① 用量页去截断 | 需要 | 需要（已支持弹性正则动态匹配，抗混淆变量漂移） |
-| ② 模型弹窗加宽 | 两处锚点 | 需要，但只剩**扁平弹窗**一处（渠道子菜单上游已改为自适应宽度 `w-max min-w-48`，脚本识别后报「无需补丁」） |
-| ③ TPS 状态栏 | 需要 | 需要（支持原生思考 Token 统计、耗时精准校准与双态按钮常驻追踪） |
-| ④ 模型拉取按钮 | 需要 | 需要，优先对齐官方 `model-provider-add-model-button` 契约，模板按 `optionSpecs` 新格式写入 |
-| ⑤ 增强提示词 | —（新功能） | 需要：优先对接官方 `v4-model-config` 契约锚点；支持右键按供应商自选模型，持久化且免重启 |
+| ① TPS 状态栏 | 需要 | 需要（支持原生思考 Token 统计、耗时精准校准与双态按钮常驻追踪） |
+| ② 模型拉取按钮 | 需要 | 需要，优先对齐官方 `model-provider-add-model-button` 契约，模板按 `optionSpecs` 新格式写入 |
+| ③ 增强提示词 | —（新功能） | 需要：优先对接官方 `v4-model-config` 契约锚点；支持右键按供应商自选模型，持久化且免重启 |
 
 > **升级会整体覆盖 app.asar**：升级后需重跑补丁。
-> 其中**重打包级**（③ TPS 状态栏 / ④ 模型拉取按钮 / ⑤ 增强提示词）重跑时会按内容比对
-> 自动热更新脚本，无需先 `--revert`；① 用量图 / ② 弹窗加宽是**字节级原地覆盖**，重跑即可。
+> 三项都是**重打包级**，重跑时会按内容比对自动热更新脚本，无需先 `--revert`。
 
 - 通用开关（所有补丁适用）：`--all` 对所有功能生效（等价于写全所有补丁参数）·
   `--dry-run` 只报告改动不写盘 · `--verbose` 打印安装探测细节 ·
@@ -72,9 +70,9 @@ python "<skill目录>/scripts/doctor.py" --where  # 只查「插件装在哪」+
 
 ### 插件开关（配置区）
 
-插件在 ZCode 的「设置 → 插件 → 已安装 → 点开插件 → 高级信息 → 配置」里声明了 8 个开关。**不拨也能用**：没保存过配置时按清单默认值（全开）注入。拨动开关并点「保存配置」后，插件会在**下次会话启动时登记期望状态**，再由 `apply_after_exit.py` 在 **ZCode 退出时写入**客户端（写完自动重启 ZCode），不需要手动跑命令（插件的安装方式见仓库 README 的「安装」章节）：
+插件在 ZCode 的「设置 → 插件 → 已安装 → 点开插件 → 高级信息 → 配置」里声明了 3 个开关。**不拨也能用**：没保存过配置时按清单默认值（全开）注入。拨动开关并点「保存配置」后，插件会在**下次会话启动时登记期望状态**，再由 `apply_after_exit.py` 在 **ZCode 退出时写入**客户端（写完自动重启 ZCode），不需要手动跑命令（插件的安装方式见仓库 README 的「安装」章节）：
 
-> **为什么五项一律等退出**：`zcode_patcher.py` 的运行预检是**全局**的 —— `zcode_running()` 只查
+> **为什么三项一律等退出**：`zcode_patcher.py` 的运行预检是**全局**的 —— `zcode_running()` 只查
 > `tasklist` 里有没有 `ZCode.exe`，与 target 无关，命中就直接 `return 2` 拒绝写入（app.asar 被锁、
 > `config.json` / `provider_config.json` 会被客户端回写覆盖）。而会话钩子**必然**在 ZCode 运行中触发，
 > 所以「会话内立即生效」这条路走不通。`sync.py` 的策略是**先试立即写，被拒就自动转交退出后看护**，
@@ -82,8 +80,6 @@ python "<skill目录>/scripts/doctor.py" --where  # 只查「插件装在哪」+
 
 | 开关 | 控制的功能 | 默认 | 生效时机 |
 |---|---|---|---|
-| 用量页去截断 | `--usage-chart` | 开 | ZCode 退出时自动应用，**再启动**才生效（两次启停） |
-| 模型弹窗加宽 | `--model-width` | 开 | ZCode 退出时自动应用，**再启动**才生效（两次启停） |
 | TPS 状态栏 | `--tps-footer` | 开 | ZCode 退出时自动应用，**再启动**才生效（两次启停） |
 | 设置页模型拉取按钮 | `--model-puller` | 开 | ZCode 退出时自动应用，**再启动**才生效（两次启停） |
 | 增强提示词按钮 | `--enhance-prompt` | 开 | ZCode 退出时自动应用，**再启动**才生效（两次启停） |
@@ -107,7 +103,7 @@ python "<skill目录>/scripts/doctor.py" --where  # 只查「插件装在哪」+
   内核 `Lio()` 里 `t.additionalContext && n.additionalContexts.push(...)` 是**无条件**消费的，
   而 `hookSpecificOutput` 还要校验 `hookEventName` 与本次事件一致（写错 → 「Hook returned wrong
   event name」→ 这次钩子被标成失败）。另外 stdout 只在 `wQs()` 的 `startsWith("{")` 成立时才解析。
-- 字节级补丁（图表 / 加宽）当场执行；重打包级补丁（TPS / 增强 / 拉取）写进退出后看护
+- 重打包级补丁（TPS / 增强 / 拉取）写进退出后看护
   `scripts/apply_after_exit.py`，等 ZCode 完全退出时自动应用（**asar 本身没有被锁**，实测
   `CreateFileW(share=0)` 能独占打开；真正的原因是 ZCode **只在启动时读一次** app.asar，
   运行期写入不影响当前会话）。
@@ -116,7 +112,7 @@ python "<skill目录>/scripts/doctor.py" --where  # 只查「插件装在哪」+
 - 日志与心跳：`scripts/_sync.log`（同步日志）、`scripts/_sync.last`（每次被调用都刷新，
   证明「钩子到底跑没跑」）。没找到配置时会记录 `config.json` 里 `plugins` 的实际键名。
 - 一键自检：`python scripts/doctor.py`（只读）——插件是否安装/启用、配置是否保存过、
-  钩子是否跑过、五项补丁状态，末尾直接给卡点结论。`--where` 只查安装位置，
+  钩子是否跑过、三项补丁状态，末尾直接给卡点结论。`--where` 只查安装位置，
   `--where-all` 连扫过的全部候选目录一起列（本机 120 个，默认只列命中项）。
 - **插件副本的三种落点**（判断「装没装」要**按清单里的 name 认**，不能靠目录名）：
   - `<数据>/cli/plugins/marketplaces/<市场 id>/` —— directory 来源；`source: "./"` 时**市场根即插件根**
@@ -206,18 +202,16 @@ python "<skill目录>/scripts/zcode_patcher.py" --model-puller
 > 也可以自己挂一条计划任务调用 `scripts/apply_after_exit.py`（它自行探测安装位置，
 > 退出后按期望状态应用补丁并重启 ZCode）；不需要时删掉该任务即可。
 
-八个补丁，均幂等、可检查、可还原、ZCode 升级后需重打：
+三项补丁，均幂等、可检查、可还原、ZCode 升级后需重打：
 
 | 能力 | 说法 | 命令 | 改哪里 |
 |---|---|---|---|
-| 打开统计图 | 用量页趋势图/饼图去截断 | `python zcode_patcher.py --usage-chart [--check/--revert]` | app.asar 内渲染文件（同长度原地改字节 + integrity 同步） |
-| 加宽模型弹窗 | 模型选择浮窗加宽，长模型名不再截断 | `python zcode_patcher.py [--check/--revert]` | app.asar 内主 bundle（同长度原地改字节） |
 | 打开状态栏 | 输入框下方居中统计条（**v2 纯 DOM 观测，3.12.2+ 安全**；右键可切工具栏/会话顶部 sticky）：即时指标（首 token/tok/s）+ 会话累计（N轮N步、输入/输出/平均命中率）+ 今日总耗 | `python zcode_patcher.py --tps-footer [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
 | 模型拉取按钮 | 设置页一键拉取/勾选模型 | `python zcode_patcher.py --model-puller [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
 | **增强提示词** | 输入框旁一键润色草稿（可恢复原文）；**右键**弹出菜单选择使用哪个模型 | `python zcode_patcher.py --enhance-prompt [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
 
-两个及以上功能可一次执行：`python zcode_patcher.py --usage-chart --tps-footer  --model-puller`。
-全部功能一条命令：`python zcode_patcher.py --all [--check/--revert]`（等价于写全上表所有补丁参数 + 内核补丁）。
+两个及以上功能可一次执行：`python zcode_patcher.py --tps-footer --model-puller`。
+全部功能一条命令：`python zcode_patcher.py --all [--check/--revert]`（等价于写全上表所有补丁参数）。
 另有命令行版拉模型（不动 asar，直接同步 config.json + provider_config.json）：`python scripts/model_pull.py --all [--dry-run]`。
 
 **通用开关**：`--all`（对所有功能生效）· `--dry-run`（只报告改动不写盘）· `--verbose`（打印探测细节）· `--force`（跳过备份指纹校验，慎用）。
@@ -228,37 +222,24 @@ python "<skill目录>/scripts/zcode_patcher.py" --model-puller
 
 1. **定位安装**：脚本自动探测（运行中进程 → 注册表 → 常见目录，跨 Windows/macOS/Linux，见「跨平台约定」）；探测不到就把安装根目录作为位置参数传入（加 `--verbose` 看每一步探测结果）。
 2. **只读核实**（能否生效的判断，全部只读，可放心先跑）：
-   - `python zcode_patcher.py --all --check`：**一条命令看全部 8 项**（含客户端版本、8 行执行汇总表）。
+   - `python zcode_patcher.py --all --check`：**一条命令看全部 3 项**（含客户端版本、3 行执行汇总表）。
      用户问「现在什么状态」「装好了吗」时先跑这条；下面各条是单项细看。
-   - `python zcode_patcher.py  --check`：**3.14.x 先看这个**——哪些模型已配档位、哪些缺档位、哪些已在界面手动配置过（冲突会跳过）。
-   - `python zcode_patcher.py --check`：内核补丁状态；输出「原生档位机制（optionSpecs），本补丁不适用」即 3.14+，直接走上面的 ``；≤3.11 且版本不在「已知符号表」时跑 `--extract`——能提取出锚点即可生效，提取失败说明内核结构变了，按「新版本锚点提取」人工分析后再动。
-   - `python zcode_patcher.py --usage-chart --check`：两个截断表达式是否命中。
-   - `python zcode_patcher.py --check`：扁平弹窗锚点是否命中（3.14.x 渠道子菜单锚点已不存在，报「上游已改为自适应宽度，无需补丁」属预期）。
    - `python zcode_patcher.py --tps-footer --check`：index.html 是否找到、注入状态。
-   - `python zcode_patcher.py  --check`：滑条脚本注入状态。
    - `python zcode_patcher.py --model-puller --check`：四组件（renderer / index 挂载 / preload 桥 / main handler）逐个是否就位。
    - `python zcode_patcher.py --enhance-prompt --check`：同上四组件（增强提示词与拉取按钮共用 preload/main 锚点，
      注入段按 `/*zp:begin:<块名>*/` 标记定界，两者可独立装卸、互不干扰）。
    - 脚本对「表达式出现次数 ≠1」「锚点不唯一」等情况一律拒绝盲改并报告原因——报告即结论，不要绕过。
 3. **确认备份就绪并展示还原命令**（打补丁前必须完成，AI 代执行时明确提示用户保存还原命令）：
-   - 档位配置：首次写入自动生成 `provider_config.json.reasoning-bak`
-   - 思考等级：首次打补丁自动生成 `zcode.cjs.bak`（整文件备份）+ `zcode.cjs.bak.meta.json`（指纹）
    - 状态栏/拉取按钮：首次注入自动生成 `app.asar.<补丁>.bak`（整包备份，带 `.meta.json` 指纹）+ sidecar json
-   - 统计图/弹窗加宽：sidecar `app.asar.chart-patch.json` / `app.asar.width-patch.json` 记录全部原始字节
    - **备份带版本指纹**：客户端升级覆盖内核/asar 后，旧备份指纹失配会被自动归档（改名 `.stale-<时间>`），
      还原时若当前文件与备份不同版本会**拒绝执行**（提示用 `--force` 或 `restore_clean.py`），
      避免"把旧版内核/asar 盖回新客户端"。
-4. **展示执行命令与还原命令**——**单功能单命令，按用户点名的功能给对应命令，不要捆绑其他功能**（各补丁相互独立；低风险的档位配置/思考等级/统计图 AI 可在核实与备份确认后直接代执行，重打包级的状态栏/拉取按钮交由用户执行）。以「打开状态栏」为例：
+4. **展示执行命令与还原命令**——**单功能单命令，按用户点名的功能给对应命令，不要捆绑其他功能**（各补丁相互独立；重打包级的状态栏/拉取按钮/增强提示词交由用户执行）。以「打开状态栏」为例：
    ```bash
    # 执行
    python "<skill目录>/scripts/zcode_patcher.py" --tps-footer
    # 还原（万一异常，保存备用；完全退出 ZCode 后执行，还原后重启 ZCode）
    python "<skill目录>/scripts/zcode_patcher.py" --tps-footer --revert
-   ```
-   3.14.x 配档位则是：
-   ```bash
-   python "<skill目录>/scripts/zcode_patcher.py"           # 写入
-   python "<skill目录>/scripts/zcode_patcher.py"  --revert # 还原
    ```
    人工自助时用户自行执行；AI 代执行时经用户确认后由 AI 运行，或用户复制命令自己跑。
    不确定会改什么时先加 `--dry-run` 预演（不写盘）。
@@ -358,65 +339,15 @@ python autopilot.py --max-retries 5                  # 提高可恢复错误的�
 ZCode 升级会覆盖 zcode.cjs 与 app.asar，升级后过一遍（**先完全退出 ZCode**；`--check` 不受此限）：
 
 ```bash
-python zcode_patcher.py --check                    # 思考等级：3.14+ 会提示"不需要本补丁"
-python zcode_patcher.py  --check # 档位配置（3.14+ 看这个）
-python zcode_patcher.py --usage-chart --check
-python zcode_patcher.py --check
 python zcode_patcher.py --tps-footer --check
-python zcode_patcher.py  --check
 python zcode_patcher.py --model-puller --check
 python zcode_patcher.py --enhance-prompt --check
 ```
 
-失配的按「自助使用流程」重打；思考等级补丁在 ≤3.11 新内核上先 `--extract` 确认锚点可提取。
-重打包级补丁（状态栏/拉取按钮）被升级覆盖后直接重跑即可——旧备份会被自动归档，不会误还原。
+失配的按「标准执行流程」重打；
+重打包级补丁（状态栏/拉取按钮/增强提示词）被升级覆盖后直接重跑即可——旧备份会被自动归档，不会误还原。
 
-## 一、打开统计图：用量页去截断
-
-「设置 → 用量」两处展示截断，本补丁一并放开：
-
-| 位置 | 原始行为 | 补丁点 |
-|---|---|---|
-| 每日 Token 趋势图 | 只画 Top 6 模型折线（`n.models.slice(0,6)`；每日 total 含全部模型） | 改为 `n.models` 全量出线 |
-| 模型用量饼图 | 模型 >6 个时只画 Top 5，其余合并为「其他模型」（`i=n.length>Q,a=i?Q-1:Q`，Q=6） | 改为 `i=!1,a=1/0` 全量出块、无合并 |
-
-```bash
-python zcode_patcher.py --usage-chart            # 打补丁（asar 内同长度字节级原地覆盖）
-python zcode_patcher.py --usage-chart --check    # 查状态
-python zcode_patcher.py --usage-chart --revert   # 从 sidecar 还原全部原始字节
-```
-
-- 原理：解析 asar 头定位渲染文件偏移，替换截断表达式后用空格补齐到原字节长度原地写回——asar 头、offset、unpacked 结构零改动，无需重打包
-- **integrity 同步**：改内容的同时按 sha256 hex 定长特性，同长度原地交换 asar 头里该条目的 integrity 哈希串，使记录与内容一致（Electron 默认不校验，但保持诚实；打/还原/已打重跑三条路径都会自动同步，可修复历史遗留的失配）
-- 原始字节 base64 存同目录 `app.asar.chart-patch.json`（sidecar，含全部补丁点记录）
-- **sidecar 带 asar 尺寸指纹**：每条记录绑定当时的 app.asar 总大小，ZCode 升级覆盖 asar 后旧 offset 不可信，指纹失配的记录自动作废重建（实测 3.9.1→3.9.2 升级后重打正常；TPS 重打包后脚本自动同步本 sidecar 的 offset/指纹）
-- 两处调色盘均 6 色循环取色，第 7+ 个模型颜色重复，靠图例/标签区分
-- 定位按文件名特征 + 截断表达式匹配，与文件名哈希无关，跨版本稳定（3.9.1→3.9.2 文件名哈希变化仍能命中）
-
-## 二、加宽模型选择弹窗
-
-模型选择浮窗（点工具栏模型名弹出的那个，含「先选渠道、再选模型」的二级子菜单）默认宽 `w-48` = **192px**，长模型名（如 `cn:deepseek-v4.1-flash`、带前缀的供应商模型）会被 `truncate` 截断，只能靠 hover 的 `title` 看全。本补丁把它加宽到 `w-80` = **320px**。
-
-```bash
-python zcode_patcher.py            # 打补丁（同长度字节级原地覆盖）
-python zcode_patcher.py --check    # 查状态
-python zcode_patcher.py --revert   # 从 sidecar 还原
-```
-
-两处补丁点（都在渲染层主 bundle，如 `out/renderer/assets/styles-*.js`）：
-
-| 位置 | 原始 | 补丁后 |
-|---|---|---|
-| 二级子菜单（渠道 → 模型列表，`j??\`w-48\``） | 192px | 320px |
-| 扁平弹窗（无渠道分组的单层列表，`\`w-48 max-h-72 overflow-y-auto\``） | 192px | 320px |
-
-- **零重打包**：`w-48` 与 `w-80` 字面量**等长**（同为 4 字符），属同长度原地覆盖，asar 头/offset 零改动；ZCode 运行中也能写（不涉及文件替换）
-- 宽度类名需已编译进 CSS：已核实 `.w-80` 存在（若未来版本裁剪了该类，可换 `w-64`/`w-72`/`w-96`，都已在 CSS 中；`min-w-*` 多数未编译，勿用）
-- **文件按内容定位**（不依赖 assets 文件名里的哈希），跨版本稳定
-- 状态判定兼容"已打"：锚点已被替换后，用替换后形态反查确认，不会误报「未找到锚点」
-- 原始字节存 `app.asar.width-patch.json`，与图表补丁同为字节级 sidecar
-
-## 三、打开状态栏：TPS 统计胶囊
+## 一、打开状态栏：TPS 统计胶囊
 
 > **实现：`zcode-tps.js`（双源混合）—— 事件流做流式实时层 + DB 快照做精确结算层**
 >
@@ -511,14 +442,14 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 
 ### 注入原理（asar 重打包级）
 
-与统计图补丁的同长度原地覆盖不同，状态栏要**新增文件**，必须整体重打包：
+状态栏要**新增文件**，必须整体重打包：
 
 1. 注入内容（0.6.26 起 4 组件，走 `_process_ipc_patch` 通用链路）：`out/renderer/index.html` 的 `</body>` 前插 `<script src="./zcode-tps.js"></script>`；zcode-tps.js 作为新条目写入 `out/renderer/`；preload 加 `getUsageSnapshot` 桥（`/*zp:begin:ztps-snapshot*/` 定界）；main 加 `zcode:tps-snapshot` 只读 handler。index.html 无 CSP meta、无 nonce，普通脚本标签即可（在 `type="module"` 的 React bundle 之前同步执行，注册监听早于应用挂载）。0.6.25 及更早的 2 组件旧安装会被 check 报 stale，自动重跑补齐 IPC 块。
 2. asar 布局（读/写同一公式）：头 16 字节 = 4 个 uint32 LE `[4, headerSize, pickleLen, jsonLen]`，`pickleLen = 4 + jsonLen + pad4`，`headerSize = 8 + jsonLen + pad4`，数据区起点 = `16 + jsonLen + pad4`（pad4 把 JSON 补齐到 4 字节倍数）；文件条目 `offset` 为相对数据区起点的字符串，全部文件带 integrity（SHA256 全文 + 4MB 分块 hex）。
 3. 重打包流程：读全量 → 树上删条目/插占位/标记覆盖 → 全部条目 offset 重排 → 覆盖与新增条目重算 integrity → 写临时文件 → **回读校验**（逐条比对注入条目字节）→ 原子替换。
 4. **实现关键坑**（改 `_repack_asar` 前必读）：offset 重排会直接改写条目，此后从旧文件切片必须用**重排前快照的旧位置**，否则「新 offset + 旧数据区起点」错位读取（实测 50 个抽查文件错 11 个，且改动文件恰好走覆盖分支不受影响，极易漏测）；新增条目的树插入必须在重打包函数内部做（外层持有的树引用与函数内部重新读入的不是同一棵）。
 5. 备份与记录：首次注入前整包备份 `app.asar.tps.bak`；`app.asar.tps-patch.json` 记录原始 index.html（base64）与 asar 尺寸指纹。
-6. 与统计图补丁联动：重打包使 chart sidecar 的绝对 offset/指纹失效，脚本自动按「文件路径 + 尺寸」重定位同步；反向无影响（统计图是同长度覆盖，不改 offset）。
+6. 重打包会改变整包尺寸：tps/puller/enhance 三个 sidecar 里记录的 asar_size 指纹由脚本自动同步（`_refresh_repack_sidecars`）。
 
 ### 升级 / 回退 / 排障
 
@@ -534,7 +465,7 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 | tok/s 不出现 | 该轮从未有过文本流（纯工具调用轮）时无速度可算，属预期；有文本流后静默期（工具执行）保持最近值 |
 | 想换脚本逻辑 | 改 zcode-tps.js 后重跑 `--tps-footer`（内容变了会自动热更新脚本条目，无需 revert） |
 
-## 四、模型拉取按钮：设置页一键拉取/勾选模型
+## 二、模型拉取按钮：设置页一键拉取/勾选模型
 
 设置 → 模型供应商页注入「⚡️ 自动拉取模型」按钮：点开弹窗自动拉取该供应商 `/models` 接口的模型列表，标注「已添加/新模型」并勾选，保存后经**原生 IPC** 读写 `~/.zcode/v2/config.json` 并自动刷新界面——不用退出 ZCode、不用手改 config。
 
@@ -553,7 +484,7 @@ python zcode_patcher.py --model-puller --puller-src /path/to/zcode-model-puller.
 - **新模型模板（元数据感知）**：拉取时读取 `/v1/models` 透出的每模型元数据——`context_length`/`max_input_tokens` → `limit.context`、`max_output_tokens`/`max_completion_tokens` → `limit.output`、`supported_efforts` → `reasoning.variants`（自动前插 off 档）、`default_effort` → `defaultVariant`（workbuddy2api 等网关透出这些字段）；元数据缺失时退回保守模板 `limit 1M/128k + off/high/max`。`zcode.modified: true` 恒有——与 CLI `model_pull.py` 一致
 - **还原全外科手术式**：index.html 只摘自己的 tag、preload/main 用正则精确摘除自己注入的字节段（别名通配），**不依赖 sidecar 指纹**——其他补丁重打包改了 asar 大小也能精确还原；TPS 的还原同样已改为外科手术式，两个重打包级补丁任意顺序装/卸互不误伤
 - **组件级热更新**：`--check`/注入以「内容比对」判定每个组件是否为现行版本（不能只看 marker——换实现后 marker 不变会漏更新）；不一致的组件自动重注入，一致的原样跳过；注入段形态不符（被手工改过）时拒绝改写并提示
-- **备份**：首次注入整包备份 `app.asar.puller.bak` + sidecar `app.asar.puller-patch.json`；与 TPS/chart 的 sidecar 联动同现有机制（重打包后自动同步 chart sidecar 的 offset/指纹）
+- **备份**：首次注入整包备份 `app.asar.puller.bak` + sidecar `app.asar.puller-patch.json`；与 TPS 的 sidecar 联动同现有机制（重打包后自动同步 sidecar 的 asar_size 指纹）
 
 ### 命令行版（不动 asar）
 
@@ -577,7 +508,7 @@ python scripts/model_pull.py --test https://api.example.com/v1 [KEY]
 | 想换注入脚本逻辑 | 改 `scripts/zcode-model-puller.js` 或改 preload/main 注入构造器后重跑 `--model-puller` 即可——**四组件（renderer/preload/main/index）均按内容比对**，只更新与现行实现不一致的组件，无需 revert；`--check` 会显示「含旧版组件，重跑可自动更新」 |
 | 保存后档位丢失 | 正常不会（整读整写不重建条目）；若用 ZCode 自带设置页保存过该 provider，属其重建路径剥掉 variants，重配 reasoning 即可 |
 
-## 五、增强提示词：「润色」按钮、右键选模型与跨机「Model is unavailable」
+## 三、增强提示词：「润色」按钮、右键选模型与跨机「Model is unavailable」
 
 输入框工具栏一键润色草稿（图标 3 态：✦ 待机 / ◌ 增强中 / ↺ 可还原 20s）。
 

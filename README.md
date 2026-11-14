@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.33-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.34-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -11,7 +11,6 @@
 为 ZCode 桌面客户端补齐极致原生体验与生产力增强：
 - 📊 **实时 TPS 与性能状态栏**：首 Token 延迟、tok/s 生成速度、会话轮数/步数、输入/输出与平均命中率、今日总耗常驻展示。
 - ✨ **提示词智能增强**：输入框旁一键重写润色草稿；**右键自由选择**润色所用模型，支持一键恢复。
-- 📈 **用量图表全量展开**：破除官方 Top 5/6 截断限制，全量展示所有模型的调用趋势与占比。
 - ⚡ **设置页模型自动拉取**：设置页一键获取供应商可用模型，批量同步写入配置。
 - ⚡ **一键模型同步**：设置页一键获取供应商 `/models` 模型列表，勾选即刻自动建条目并写入。
 - 🛡️ **无感自愈看护（0.6.11 新特性）**：自动感知客户端与插件升级，后台单例看护静默守护，**彻底解决“客户端一升级补丁就失效”！**
@@ -46,7 +45,6 @@
 | 🛡️ | **升级自动自愈** | 动态监控客户端与插件版本，升级后自动感知并调度看护静默修复 | 状态监控器 |
 | 📊 | **实时 TPS 状态栏** | 输入框常驻：即时指标（首 token / tok/s）+ 会话累计（N轮N步 / 输入 / 输出 / 平均命中）+ 今日总耗，右键自由切换位置 | `app.asar` 注入脚本 |
 | ✨ | **提示词增强润色** | 输入框旁「增强提示词」按钮，右键支持按供应商自选润色模型，持久化且免重启 | `app.asar` 注入脚本 + IPC |
-| 📈 | **用量图表去截断** | 「设置 → 用量」趋势图与饼图不再被 Top 5 / Top 6 截断，全量展示所有模型 | `app.asar` 渲染层 |
 | ⚡ | **设置页模型拉取** | 设置页新增「⚡ 自动拉取模型」按钮，自动从供应商同步可用模型并批量写入 | `app.asar` 注入脚本 + IPC |
 
 ---
@@ -151,6 +149,13 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.34（移除用量页去截断功能，精简为 3 项补丁）
+- **功能移除**：删除用量页去截断补丁（趋势图/饼图全量）——`--usage-chart` 参数、字节级补丁实现与 `app.asar.chart-patch.json` sidecar 机制整体下线，`--all`、插件开关清单、看护默认任务、doctor 检查项同步收敛为 TPS 状态栏 / 增强提示词 / 模型拉取按钮 3 项；
+- **顺手清债**：0.6.23 移除模型弹窗加宽时遗留的不可达代码（失去函数头的 WIDTH 补丁体，及 `_load_sidecar` / `_asar_sync_integrity` / `_relocate_sidecar`）一并删除；sidecar 刷新函数更名 `_refresh_repack_sidecars`，只保留重打包级 sidecar 的指纹同步；
+- **废弃产物清理**：`app.asar.chart-patch.json` 移入自动清理清单（与 slider/width sidecar 同待遇）；已打上的图表字节随下一次客户端升级被官方文件覆盖，自然回到原版行为；
+- **配置兼容**：已保存过的 `usage_chart` 开关键不会被再执行（sync 按开关清单逐项遍历），doctor 里显示为「未知键」，无副作用，下次保存插件配置时自然消失；
+- **测试**：全量 311 项通过；引擎「非重打包级当场重跑」分支改用桩补丁钉住（当前三个真实补丁均为重打包级）；
 
 #### 0.6.33（修复 ZCode 退出时看护被连带结束，导致升级后补丁永远不写入）
 - **根因**：Electron/Chromium 把子进程放进带 `KILL_ON_JOB_CLOSE` 的 Windows Job 对象；ZCode 退出时整棵进程树被结束，`DETACHED_PROCESS` 的退出看护也一起被杀。实测 `CREATE_BREAKAWAY_FROM_JOB` 会被 Job 拒绝（WinError 5），所以看护永远等不到「ZCode 已退出」，升级覆盖后的补丁也就一直不写入；

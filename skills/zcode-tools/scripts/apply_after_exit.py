@@ -131,14 +131,12 @@ def resolve_install() -> tuple[Path | None, Path | None]:
 
 # 配置键 -> zcode_patcher.py 参数（与 sync.py 的 PATCHES 一一对应，顺序也保持一致）
 PATCH_ARGS = {
-    "usage_chart": ["--usage-chart"],
     "tps_footer": ["--tps-footer"],
     "enhance_prompt": ["--enhance-prompt"],
     "model_puller": ["--model-puller"],
 }
-# 未收到 --want 时的默认动作（本地计划任务用）：全量 4 项补丁按序全部应用
+# 未收到 --want 时的默认动作（本地计划任务用）：全量 3 项补丁按序全部应用
 DEFAULT_TASKS = [
-    ["--usage-chart"],
     ["--tps-footer"],
     ["--enhance-prompt"],
     ["--model-puller"],

@@ -97,7 +97,7 @@ def patcher_stubbed(sync, states=None, verdicts=None):
       check_state   → 查表返回（默认全 "on"，即「客户端已一致」，最安全的基线）
       run_patcher   → 只记录，不执行（默认返回 "ok"；verdicts 可让某组参数返回 "refused"/"fail"）
       start_watchdog→ 只记录，不起进程
-    调用记录形如 ("run", ("--usage-chart",), False) / ("watchdog", {"tps_footer": True})。
+    调用记录形如 ("run", ("--tps-footer",), False) / ("watchdog", {"tps_footer": True})。
     """
     table = states or {}
     vtable = verdicts or {}
@@ -323,49 +323,6 @@ class TestAsarRepack(TempCase):
         t.join(5)
 
 
-class TestIntegritySync(TempCase):
-    """integrity 同步必须只动目标条目——同内容条目不能被误伤。"""
-
-    def setUp(self):
-        super().setUp()
-        self.asar = self.tmp / "app.asar"
-        build_asar(self.asar, {
-            "dup1.txt": b"same-content",
-            "dup2.txt": b"same-content",
-            "target.js": b"old-target",
-        })
-
-    def test_sync_only_touches_target_entry(self):
-        new = b"new-target"
-        raw, header, data_start = zp._asar_header_raw(self.asar)
-        ent = zp._asar_find_entry(header, "target.js")
-        # 原地覆盖 + 同步 integrity（模拟字节级补丁）
-        with open(self.asar, "r+b") as f:
-            f.seek(data_start + int(ent["offset"]))
-            f.write(new)
-        quiet(zp._asar_sync_integrity, self.asar, "target.js", new)
-
-        _, header2, _ = zp._asar_header_raw(self.asar)
-        self.assertEqual(zp._asar_find_entry(header2, "target.js")["integrity"],
-                         zp._asar_integrity(new))
-        for p in ("dup1.txt", "dup2.txt"):
-            self.assertEqual(zp._asar_find_entry(header2, p)["integrity"],
-                             zp._asar_integrity(b"same-content"),
-                             f"{p} 的 integrity 被误改")
-
-    def test_sync_is_idempotent(self):
-        new = b"new-target"
-        zp._asar_sync_integrity(self.asar, "target.js", new)
-        before = self.asar.read_bytes()
-        quiet(zp._asar_sync_integrity, self.asar, "target.js", new)
-        self.assertEqual(self.asar.read_bytes(), before, "重复同步不应改文件")
-
-    def test_sync_dry_run_does_not_write(self):
-        before = self.asar.read_bytes()
-        quiet(zp._asar_sync_integrity, self.asar, "target.js", b"zzz", dry_run=True)
-        self.assertEqual(self.asar.read_bytes(), before)
-
-
 class TestRepackMemory(TempCase):
     """重打包不该把整包读进内存——真实 app.asar 三百多 MB，整包读入会让峰值接近 2× 包体。"""
 
@@ -419,12 +376,13 @@ class TestPrune(TempCase):
     def test_default_prune_only_archives_and_temps(self):
         quiet(zp.prune_artifacts, [self.asar], False)
         left = self.names()
-        for keep in ("app.asar.tps.bak", "app.asar.chart-patch.json",
-                     "unrelated.txt", "app.asar.old", "app.asarfoo", "app.asar"):
+        for keep in ("app.asar.tps.bak", "unrelated.txt", "app.asar.old",
+                     "app.asarfoo", "app.asar"):
             self.assertIn(keep, left, f"{keep} 不该被删")
         for gone in ("app.asar.puller.bak.stale-20260101-000000",
-                     "app.asar.123.tmp", "app.asar.tps-tmp"):
-            self.assertNotIn(gone, left, f"{gone} 应被清理")
+                     "app.asar.123.tmp", "app.asar.tps-tmp",
+                     "app.asar.chart-patch.json"):
+            self.assertNotIn(gone, left, f"{gone} 应被清理（废弃功能的 sidecar）")
 
     def test_deep_prune_also_removes_backups_and_sidecars(self):
         quiet(zp.prune_artifacts, [self.asar], True)
@@ -522,33 +480,11 @@ class TestSidecarFingerprint(TempCase):
         self.asar = self.tmp / "app.asar"
         build_asar(self.asar, {"a.js": b"aaaa", "b.js": b"bbbb"})
 
-    def test_mismatched_size_invalidates_records(self):
-        side = self.asar.with_name(self.asar.name + ".chart-patch.json")
-        side.write_text(json.dumps({"patches": [
-            {"path": "a.js", "offset": 0, "size": 4, "asar_size": 12345, "original_b64": ""},
-        ]}), encoding="utf-8")
-        self.assertEqual(zp._load_sidecar(side, self.asar.stat().st_size), [])
-        self.assertEqual(len(zp._load_sidecar(side)), 1, "不带指纹时不应过滤")
-
-    def test_refresh_updates_byte_level_offsets(self):
-        side = self.asar.with_name(self.asar.name + ".chart-patch.json")
-        side.write_text(json.dumps({"patches": [
-            {"path": "b.js", "offset": 0, "size": 4,
-             "asar_size": self.asar.stat().st_size, "original_b64": ""},
-        ]}), encoding="utf-8")
-        zp._repack_asar(self.asar, {"a.js": b"aaaaaa"}, set())
-        quiet(zp._refresh_chart_sidecar, self.asar)
-        rec = json.loads(side.read_text(encoding="utf-8"))["patches"][0]
-        _, header, data_start = zp._asar_header_raw(self.asar)
-        ent = zp._asar_find_entry(header, "b.js")
-        self.assertEqual(rec["offset"], data_start + int(ent["offset"]))
-        self.assertEqual(rec["asar_size"], self.asar.stat().st_size)
-
     def test_refresh_updates_repack_level_sidecar_size(self):
-        """TPS/滑条/拉取按钮的 sidecar 只记 asar_size，也要跟着重打包更新。"""
+        """TPS/拉取按钮/增强提示词的 sidecar 只记 asar_size，也要跟着重打包更新。"""
         side = self.asar.with_name(self.asar.name + ".tps-patch.json")
         side.write_text(json.dumps({"asar_size": 1, "script_entry": "x.js"}), encoding="utf-8")
-        quiet(zp._refresh_chart_sidecar, self.asar)
+        quiet(zp._refresh_repack_sidecars, self.asar)
         self.assertEqual(json.loads(side.read_text(encoding="utf-8"))["asar_size"],
                          self.asar.stat().st_size)
 
@@ -780,12 +716,12 @@ class TestModuleSurface(unittest.TestCase):
     REQUIRED = [
         # asar 基础
         "_read_asar_header", "_asar_header_raw", "_asar_entry_bytes", "_asar_integrity",
-        "_asar_walk_entries", "_repack_asar", "_asar_sync_integrity", "_load_sidecar",
-        "_refresh_chart_sidecar", "_cleanup_stale_tmp", "_relocate_sidecar",
+        "_asar_walk_entries", "_repack_asar",
+        "_refresh_repack_sidecars", "_cleanup_stale_tmp",
         # 备份指纹
         "_ensure_backup", "_load_backup_meta", "_mark_backup_patched", "_archive_backup",
         # 补丁入口
-        "process_usage_chart", "process_tps_footer",
+        "process_tps_footer",
         "process_model_puller", "process_enhance_prompt",
         "prune_artifacts", "_process_ipc_patch",
         # 注入块（标记定界）
@@ -895,13 +831,13 @@ class TestCheckStateWording(unittest.TestCase):
         orig = sync.subprocess
         sync.subprocess = _FakeSub          # 只换 sync 里的名字，不动全局 subprocess
         try:
-            return sync.check_state(["--usage-chart"])
+            return sync.check_state(["--tps-footer"])
         finally:
             sync.subprocess = orig
 
     def test_byte_level_wording_still_works(self):
-        self.assertEqual(self._state("    [=] a.js | 已打（每日趋势图）"), "on")
-        self.assertEqual(self._state("    [ ] a.js | 未打（每日趋势图）"), "off")
+        self.assertEqual(self._state("    [=] index.html | 已打（注入脚本）"), "on")
+        self.assertEqual(self._state("    [ ] index.html | 未打（注入脚本）"), "off")
 
     def test_unrecognized_output_is_unknown(self):
         self.assertEqual(self._state("完全看不懂的输出"), "unknown")
@@ -2009,10 +1945,22 @@ class TestSyncStaleIsReinjected(unittest.TestCase):
                       "摘要要说清「插件已更新、退出时重注入」，不能静默")
 
     def test_stale_non_repack_patch_is_applied_immediately(self):
-        """非重打包级补丁（usage_chart 等）stale 时应当**当场**重跑。"""
+        """非重打包级补丁（repack=False）stale 时应当**当场**重跑。
+
+        当前三个真实补丁全是重打包级；本条用桩补丁钉住引擎的通用分支，
+        保证将来新增字节级补丁时这条路不会悄悄坏掉。
+        """
         states = {("--usage-chart",): "stale"}
-        with patcher_stubbed(self.sync, states=states) as calls:
-            summary = quiet(self.sync.run_sync)
+        orig_patches = self.sync.PATCHES
+        orig_resolve = self.sync.resolve_wanted
+        self.sync.PATCHES = [("usage_chart", ["--usage-chart"], False)]
+        self.sync.resolve_wanted = lambda: ({"usage_chart": True}, "测试")
+        try:
+            with patcher_stubbed(self.sync, states=states) as calls:
+                summary = quiet(self.sync.run_sync)
+        finally:
+            self.sync.PATCHES = orig_patches
+            self.sync.resolve_wanted = orig_resolve
         runs = [c for c in calls if c[0] == "run" and c[1] == ("--usage-chart",)]
         self.assertEqual(len(runs), 1, f"应当场重跑一次，实际：{calls}")
         self.assertFalse(runs[0][2], "stale 且 want=True 时不应走还原")
@@ -2186,8 +2134,8 @@ class TestSearchMatchesOnlyOurPlugin(unittest.TestCase):
         注意把 -extra 放在前面 —— 修复前的实现会先撞上它。
         """
         cfg = {"plugins": {
-            "zcode-tools-extra@mkt": {"usage_chart": False, "enhance_prompt": False},
-            "zcode-tools@mkt": {"usage_chart": True, "enhance_prompt": True},
+            "zcode-tools-extra@mkt": {"tps_footer": False, "enhance_prompt": False},
+            "zcode-tools@mkt": {"tps_footer": True, "enhance_prompt": True},
         }}
         got = self.sync._search(cfg, "config.json")
         self.assertIsNotNone(got, "应能找到本插件配置")
@@ -2197,7 +2145,7 @@ class TestSearchMatchesOnlyOurPlugin(unittest.TestCase):
 
     def test_search_returns_none_when_only_other_plugins_present(self):
         """只有同前缀的**别的插件**时，不能认领 —— 否则会拿别人的配置去注入。"""
-        cfg = {"plugins": {"zcode-tools-extra@mkt": {"usage_chart": True}}}
+        cfg = {"plugins": {"zcode-tools-extra@mkt": {"tps_footer": True}}}
         self.assertIsNone(self.sync._search(cfg, "config.json"))
 
 
@@ -2404,39 +2352,44 @@ class TestAutoInject(unittest.TestCase):
 
     def test_run_sync_skips_switches_that_do_not_apply(self):
         """na 的开关既不执行也不报错，只在结论里注明「本版本不适用」。"""
-        orig = (self.sync.read_options, self.sync.declared_defaults)
-        self.sync.read_options = lambda: ({"usage_chart": True}, "config")
-        self.sync.declared_defaults = lambda: {}
+        orig = self._resolve_only({"usage_chart": True},
+                                  [("usage_chart", ["--usage-chart"], False)])
         try:
             with patcher_stubbed(self.sync, {("--usage-chart",): "na"}) as calls:
                 summary = self.sync.run_sync(echo=False)
         finally:
-            self.sync.read_options, self.sync.declared_defaults = orig
+            self._restore_sync(orig)
         self.assertEqual(calls, [], "不适用的补丁不应被执行")
         self.assertIn("本版本不适用", summary)
         self.assertNotIn("已写入", summary)
 
     def test_na_is_skipped_even_when_user_asked_for_it(self):
         """用户显式打开也不该去跑不适用的补丁——照样只标注、不执行。"""
-        orig = (self.sync.read_options, self.sync.declared_defaults)
-        self.sync.read_options = lambda: ({"usage_chart": False}, "config")
-        self.sync.declared_defaults = lambda: {}
+        orig = self._resolve_only({"usage_chart": False},
+                                  [("usage_chart", ["--usage-chart"], False)])
         try:
             with patcher_stubbed(self.sync, {("--usage-chart",): "na"}) as calls:
                 summary = self.sync.run_sync(echo=False)
         finally:
-            self.sync.read_options, self.sync.declared_defaults = orig
+            self._restore_sync(orig)
         self.assertEqual(calls, [])
         self.assertIn("本版本不适用", summary)
 
     # ------------------------------------------- 被客户端拒绝 → 转交退出后看护
 
-    def _resolve_only(self, opts):
-        """把 read_options / declared_defaults 固定住，只观察 run_sync 的动作。"""
-        orig = (self.sync.read_options, self.sync.declared_defaults)
+    def _resolve_only(self, opts, patches=None):
+        """把 read_options / declared_defaults 固定住，只观察 run_sync 的动作。
+
+        patches 用来桩掉开关清单：传 (键, 参数, 是否重打包级) 列表即可。
+        """
+        orig = (self.sync.read_options, self.sync.declared_defaults, self.sync.PATCHES)
         self.sync.read_options = lambda: (opts, "config")
         self.sync.declared_defaults = lambda: {}
+        self.sync.PATCHES = patches or []
         return orig
+
+    def _restore_sync(self, orig):
+        self.sync.read_options, self.sync.declared_defaults, self.sync.PATCHES = orig
 
     def test_refused_write_is_deferred_not_reported_as_failure(self):
         """客户端在运行 → zcode_patcher.py 直接拒绝写入（exit 2）。
@@ -2445,14 +2398,15 @@ class TestAutoInject(unittest.TestCase):
         否则用户看到的就是「未处理: xxx(执行失败)」而**永远不生效** ——
         SessionStart 钩子必然在 ZCode 运行中触发，所以这条路是常态而非例外。
         """
-        orig = self._resolve_only({"usage_chart": True})
+        orig = self._resolve_only({"usage_chart": True},
+                                  [("usage_chart", ["--usage-chart"], False)])
         try:
             with patcher_stubbed(self.sync,
                                  {("--usage-chart",): "off"},
                                  {("--usage-chart",): "refused"}) as calls:
                 summary = self.sync.run_sync(echo=False)
         finally:
-            self.sync.read_options, self.sync.declared_defaults = orig
+            self._restore_sync(orig)
         self.assertEqual(calls, [("run", ("--usage-chart",), False),
                                  ("watchdog", {"usage_chart": True})])
         self.assertNotIn("未处理", summary)
@@ -2460,31 +2414,32 @@ class TestAutoInject(unittest.TestCase):
 
     def test_hard_failure_is_still_reported(self):
         """真正的失败（锚点不匹配等）不能被「被拒」这条新分支吞掉。"""
-        orig = self._resolve_only({"usage_chart": True})
+        orig = self._resolve_only({"usage_chart": True},
+                                  [("usage_chart", ["--usage-chart"], False)])
         try:
             with patcher_stubbed(self.sync,
                                  {("--usage-chart",): "off"},
                                  {("--usage-chart",): "fail"}) as calls:
                 summary = self.sync.run_sync(echo=False)
         finally:
-            self.sync.read_options, self.sync.declared_defaults = orig
+            self._restore_sync(orig)
         self.assertIn("未处理", summary)
         self.assertEqual([c[0] for c in calls], ["run"], "失败不该起看护")
 
     def test_env_option_keys_are_lowercased(self):
         """Windows 上 os.environ 的键名是**大写**，读配置时必须归一。
 
-        不归一的话 `ZCODE_PLUGIN_CONFIG_model_width` 会变成 `MODEL_WIDTH`，
+        不归一的话 `ZCODE_PLUGIN_CONFIG_model_puller` 会变成 `MODEL_PULLER`，
         与开关名对不上 → `{**defaults, **explicit}` 里默认值（全 true）胜出，
         **用户保存的开关会被整体忽略**（静默失效，最难查）。
         """
         from unittest import mock
         env = {"ZCODE_PLUGIN_CONFIG_TPS_FOOTER": "false",
-               "ZCODE_PLUGIN_CONFIG_USAGE_CHART": "true"}
+               "ZCODE_PLUGIN_CONFIG_MODEL_PULLER": "true"}
         with mock.patch.dict("os.environ", env, clear=False):
             opts, source = self.sync.read_options()
         self.assertEqual(source, "env")
-        self.assertEqual(opts, {"tps_footer": False, "usage_chart": True})
+        self.assertEqual(opts, {"tps_footer": False, "model_puller": True})
 
     def test_watchdog_knows_every_switch(self):
         """apply_after_exit 的参数表必须覆盖 sync.PATCHES 的每一个键。
@@ -2500,17 +2455,16 @@ class TestAutoInject(unittest.TestCase):
         """看护必须将同方向的补丁参数合并为批量调用，避免多次解包/重打包 asar 导致 20s+ 耗时。"""
         import apply_after_exit as aae
 
-        # ① 全量默认任务（4项全部应用）应合并为 1 次批量调用
+        # ① 全量默认任务（3项全部应用）应合并为 1 次批量调用
         default_tasks = [(args, False) for args in aae.DEFAULT_TASKS]
         batched = aae.batch_tasks(default_tasks)
-        self.assertEqual(len(batched), 1, "全量 4 项应用任务应合并为单次调用")
+        self.assertEqual(len(batched), 1, "全量 3 项应用任务应合并为单次调用")
         args, rev = batched[0]
         self.assertFalse(rev)
         self.assertIn("--tps-footer", args)
         self.assertIn("--enhance-prompt", args)
         self.assertIn("--model-puller", args)
-        self.assertIn("--usage-chart", args)
-        self.assertEqual(len(args), 4)
+        self.assertEqual(len(args), 3)
 
         # ② 混合任务：关闭项走一次 revert，开启项走一次 apply（先还原后应用）
         mixed_tasks = [
@@ -2761,7 +2715,7 @@ class TestConsoleEncoding(unittest.TestCase):
         self.assertNotIn("UnicodeEncodeError", out, out[-600:])
         self.assertNotIn("Traceback", out, out[-600:])
         self.assertIn("执行汇总", out)
-        self.assertIn("合计 4 项", out)
+        self.assertIn("合计 3 项", out)
 
 
 class TestZcodeLogScan(unittest.TestCase):

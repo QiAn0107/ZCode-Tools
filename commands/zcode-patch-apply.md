@@ -6,7 +6,6 @@ description: 向 ZCode 客户端注入指定补丁（注入前需完全退出 ZC
 
 | 用户说法 | 命令 |
 |---|---|
-| 用量页去截断 / 打开统计图 | `--usage-chart` |
 | TPS 状态栏 / 打开状态栏 | `--tps-footer` |
 | 增强提示词 / 润色输入框 | `--enhance-prompt` |
 | 模型拉取按钮 | `--model-puller` |

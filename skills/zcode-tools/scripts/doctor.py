@@ -58,12 +58,11 @@ MARKET_SOURCE = "QiAn0107/ZCode-Tools"   # 「添加插件市场」里填的 Git
 MIN_PY = (3, 10)
 
 PATCH_KEYS = [
-    ("usage_chart", "用量页去截断"),
     ("tps_footer", "TPS 状态栏"),
     ("enhance_prompt", "增强提示词"),
     ("model_puller", "模型拉取按钮"),
 ]
-# 「重打包级」= 要改写整个 app.asar（其余几项只改字节级原地覆盖）。
+# 「重打包级」= 要改写整个 app.asar（当前全部补丁都是重打包级）。
 # 注意：zcode_patcher.py 只要发现 ZCode.exe 在跑就一律拒绝写入，
 # 所以都得等退出后由看护写。这个集合只用来区分「改的东西有多重」，不再代表「要不要重启」。
 REPACK_KEYS = {"tps_footer", "enhance_prompt", "model_puller"}
