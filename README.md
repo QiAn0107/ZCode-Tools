@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.45-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.46-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -150,6 +150,11 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.46（验证版：无功能变更——由 0.6.44 的版本烙印自动产生内容差异，实测「插件更新 → 角标数秒内亮起 → 确认应用」全链路）
+- 本版没有任何功能改动。0.6.44 起插件版本号烙进注入内容（`__ZP_VER__` → `ver:"0.6.x"`），版本一变生成内容必变 → 更新到本版时 check_state 必判 stale；
+- **预期行为**（前提已满足：客户端里为 0.6.45 的目标键控 handler，实测 15:12 已应用）：更新插件后**不开会话、不重启**，主进程按安装清单定位 0.6.46 副本补触发 sync（syncer_dir 漂移 + 目标键控守卫）→ 渲染层 10s 轮询内角标亮起 → 点击确认 → 进度小卡 → 自动重启 → 角标消失；
+- 测试：全量 366 项通过（无代码路径变化）。
 
 #### 0.6.45（修「更新后角标仍不亮」第二层：一次性守卫挡死漂移 → 改目标键控 + 60s 节流）
 - **0.6.44 用户实测**：更新插件后角标仍不亮。取证：installed=0.6.44、status 停在更新前的旧结论（syncer_dir=0.6.43）、**0.6.44 副本无 sync 日志** —— 漂移检测命中了，但补触发没跑；
