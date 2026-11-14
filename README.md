@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.44-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.45-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -150,6 +150,12 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.45（修「更新后角标仍不亮」第二层：一次性守卫挡死漂移 → 改目标键控 + 60s 节流）
+- **0.6.44 用户实测**：更新插件后角标仍不亮。取证：installed=0.6.44、status 停在更新前的旧结论（syncer_dir=0.6.43）、**0.6.44 副本无 sync 日志** —— 漂移检测命中了，但补触发没跑；
+- **根因**：0.6.41 的「一次性守卫」（每次主进程运行只许补触发一次）在更新**前**的常规 stale 检查时就被消耗（实测 14:45 耗掉），15:00 插件更新后的漂移再命中也被挡死；
+- **修复**：守卫改**目标键控** —— key=目标副本目录（规整化后比对），目标变更（=插件更新）**永远立即放行**；同目标仅在距上次触发 >60s 且仍 stale/drifted 时重试（spawn 失败自愈、绝不堆积进程）。端到端测试升级为两阶段：同一 node 进程内第一次触发消耗守卫 → 改写安装清单指向第二个副本 → 第二次必须照常触发；
+- **测试**：全量 366 项通过；发布前泄漏终验：套件零孵化（唯一定时进程为用户自己的 0.6.44 看护）。
 
 #### 0.6.44（角标代码烙版本号：每次发版必判 stale → 插件更新即亮角标；`__zinjDiag.ver` 可查客户端注入侧版本）
 - **为什么需要**：0.6.43 修好了「更新后角标不亮」，但前提是**生成内容确实变了**——若某次发版没动注入组件，check_state 判「已一致」，角标不亮（语义上没错：没东西可注入），但用户无法确认修复链路是否已生效。0.6.44 起把插件版本号烙进注入的 main handler（`_plugin_version()` 向上找最近 `.zcode-plugin/plugin.json`，替换 `__ZP_VER__` 占位符）：**每次发版生成内容必变 → 必判 stale → 插件一更新完角标数秒内必亮**（0.6.43 的双源定位 + syncer_dir 漂移检测在客户端里生效后的第一个验证版本）；

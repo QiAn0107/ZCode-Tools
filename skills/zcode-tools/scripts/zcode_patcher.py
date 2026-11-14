@@ -927,9 +927,9 @@ def _plugin_version() -> str:
 # （渲染层隐藏角标），绝不 throw。
 # ★ stale 补触发（0.6.41）：SessionStart 只在「新会话第一轮」跑 sync——应用刚启动、
 #   用户还没开会话时 status 文件是上一会话的旧结论。首次轮询发现文件缺失/损坏/
-#   时间戳过期(>30s)时，主进程后台补触发一次 `sync.py --worker`（守卫保证每次运行
-#   最多一次，与钩子并发无害）；触发全程兜底静默，任何失败都不影响本 handler 的
-#   返回值。**生成内容不烤入任何本机路径**（副本间字节一致性红线，0.6.40）。
+#   时间戳过期(>30s)时，主进程后台补触发一次 `sync.py --worker`；触发全程兜底静默，
+#   任何失败都不影响本 handler 的返回值。**生成内容不烤入任何本机路径**（副本间
+#   字节一致性红线，0.6.40）。
 # ★★ sync 位置改双源（0.6.43，修「更新插件后角标不亮、重开才亮」）：指针文件要等
 #   新副本跑过一次 sync 才刷新——插件更新后指针仍指旧副本，旧副本的 sync 判客户端
 #   「已一致」写回 pending:false，角标在重开前永远不亮（0.6.42 用户实测）。所以：
@@ -938,6 +938,12 @@ def _plugin_version() -> str:
 #   副本），handler 发现 syncer_dir ≠ 当前 installPath（路径规整化后比对）即视为
 #   过期立刻补触发——不等 30s 时间戳老化。解释器仍取指针的 python（Electron 的
 #   process.execPath 是 Electron 本体，不能当 Python 用）。
+# ★★★ 守卫改目标键控（0.6.45，修 0.6.44 用户实测「更新后角标仍不亮」）：0.6.41 的
+#   一次性守卫（每次主进程运行只许触发一次）在更新**前**的常规 stale 检查时就被消耗
+#   ——0.6.44 实测：14:45 的常规补触发耗掉守卫，15:00 插件更新后漂移命中却被挡死
+#   （0.6.44 副本无 sync 日志）。改为 key=目标副本目录：目标变更（=插件更新）永远
+#   立即放行；同目标仅在距上次触发 >60s 且仍 stale/drifted 时重试（失败自愈、
+#   不堆积进程）。
 _INJECT_STATUS_READ_HANDLER = '''
 __H__.handle("zcode:inject-status",async(ev,t)=>{
 try{
@@ -960,11 +966,12 @@ let sp=null;
 try{sp=JSON.parse(n.readFileSync(r.join(base,".zcode","v2","zcode-patches-scripts.json"),"utf-8"))}catch(_){sp=null}
 let fresh=!!st&&typeof st.stamp=="number"&&(Date.now()-st.stamp)<30000;
 let drifted=!!(st&&st.syncer_dir&&inst&&norm(st.syncer_dir)!==norm(inst));
-if((!fresh||drifted)&&!global.__zpSyncSpawned){
-global.__zpSyncSpawned=!0;
-try{
 let sdir=inst||(sp&&sp.scripts_dir);
-if(sdir&&sp&&sp.python){
+if((!fresh||drifted)&&sdir&&sp&&sp.python){
+let key=norm(sdir);
+if(key!==global.__zpSyncSpawnedFor||(Date.now()-(global.__zpSyncSpawnedAt||0))>60000){
+global.__zpSyncSpawnedFor=key;global.__zpSyncSpawnedAt=Date.now();
+try{
 let sy=inst?r.join(inst,"skills","zcode-tools","scripts","sync.py"):r.join(sp.scripts_dir,"sync.py");
 if(n.existsSync(sy)){
 let{default:c}=await import("node:child_process");
@@ -972,8 +979,8 @@ let ch=c.spawn(sp.python,[sy,"--worker"],{windowsHide:!0,detached:!0,stdio:"igno
 ch.on("error",()=>{});
 ch.unref();
 }
-}
 }catch(_){}}
+}
 if(!st||typeof st!="object"||typeof st.pending!="boolean"){
 return{success:!1,code:"no-status",error:"补丁状态文件不存在或已损坏（等 SessionStart 钩子刷新）"}}
 return{success:!0,pending:st.pending,items:st.items||{},stamp:st.stamp,lastError:st.last_error||null,ver:"__ZP_VER__"}

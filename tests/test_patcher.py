@@ -1461,7 +1461,14 @@ class TestInjectStatusBlock(unittest.TestCase):
         漂移检测（status 判定者副本 ≠ 当前安装副本 → 立即重判，不等 30s）。"""
         code = zp._INJECT_STATUS_READ_HANDLER
         self.assertIn("30000", code, "stale 判定阈值 30s")
-        self.assertIn("__zpSyncSpawned", code, "一次性守卫，每次主进程运行最多触发一次")
+        # ★ 0.6.45：一次性守卫改目标键控 + 60s 节流 —— 目标副本变更（=插件更新）
+        # 永远立即放行；同目标仅在 >60s 且仍 stale/drifted 时重试（失败自愈、不堆积）。
+        # 0.6.44 实测：一次性守卫在更新前的常规检查时就被消耗，更新后的漂移被挡死。
+        self.assertIn("__zpSyncSpawnedFor", code, "目标键控守卫")
+        self.assertIn("__zpSyncSpawnedAt", code)
+        self.assertIn(">60000", code, "同目标 60s 节流")
+        self.assertIn("key!==global.__zpSyncSpawnedFor", code,
+                      "目标变更（插件更新）必须立即放行")
         self.assertIn("installed_plugins.json", code, "安装清单 = 当前副本的权威来源")
         self.assertIn('x.id==="zcode-tools@zcode-tools"', code)
         self.assertIn("installPath", code)
@@ -1614,25 +1621,29 @@ class TestInjectStatusBlock(unittest.TestCase):
             Path(path).unlink(missing_ok=True)
 
     def test_respawn_targets_installed_copy_not_stale_pointer(self):
-        """端到端钉死 0.6.42 的实测缺陷：插件已更新（installed=新副本）、status 是
-        旧副本的结论（pending:false + 时间戳新鲜 + syncer_dir=旧副本）——handler
-        必须从**安装清单副本**补触发 sync，而不是指针里的旧副本（旧副本判客户端
-        「已一致」→ 角标重开前永远不亮）。
+        """端到端钉死两代实测缺陷（0.6.42 指针滞后 / 0.6.44 一次性守卫挡死漂移）：
+        插件已更新（installed=新副本）、status 是旧副本的结论（pending:false +
+        syncer_dir=旧副本）——handler 必须从**安装清单副本**补触发 sync，而不是
+        指针里的旧副本（旧副本判客户端「已一致」→ 角标重开前永远不亮）。
 
         做法：假家目录（USERPROFILE 指向 tempdir）里摆好三件套——installed_plugins.json
         （installPath=新副本）、status（syncer_dir=旧副本）、指针（scripts_dir=旧副本 +
-        真解释器）；两个副本各放一个**惰性 sync.py 桩**（只写 marker 就退出），真跑
-        handler 后断言 marker 来自安装清单副本。桩进程只写一个文件，无 schtasks/看护。"""
+        真解释器）；各副本放一个**惰性 sync.py 桩**（只写自己的 marker 就退出），真跑
+        handler 断言 marker 来自安装清单副本。桩进程只写一个文件，无 schtasks/看护。
+        ★ 0.6.45 追加第二阶段：**同一 node 进程内**改写安装清单指向第二个新副本再调
+        一次 —— 0.6.44 实测一次性守卫在更新前的常规检查时就被消耗，更新后的漂移被
+        挡死（0.6.44 副本无 sync 日志）；目标键控守卫必须无视已消耗状态立即再触发。"""
         node = shutil.which("node")
         if not node:
             self.skipTest("no node")
         code = zp._inject_status_main_block("j").decode()
         with tempfile.TemporaryDirectory(prefix="zpatch-inst-", ignore_cleanup_errors=True) as d:
             home = Path(d)
-            inst = home / "cache" / "zt" / "0.6.43"      # 安装清单指向的「新副本」
-            old = home / "cache" / "zt" / "0.6.42"       # 指针指向的「旧副本」
+            inst44 = home / "cache" / "zt" / "0.6.44"    # 安装清单初始指向的「新副本」
+            inst45 = home / "cache" / "zt" / "0.6.45"    # 第二阶段改指的「更新副本」
+            old = home / "cache" / "zt" / "0.6.43"       # 指针/status 的「旧副本」
             marker = home / "marker.json"
-            for root, hit in ((inst, "installed"), (old, "pointer")):
+            for root, hit in ((inst44, "inst44"), (inst45, "inst45"), (old, "pointer")):
                 sd = root / "skills" / "zcode-tools" / "scripts"
                 sd.mkdir(parents=True)
                 (sd / "sync.py").write_text(
@@ -1648,18 +1659,34 @@ class TestInjectStatusBlock(unittest.TestCase):
             (v2 / "zcode-patches-scripts.json").write_text(json.dumps(
                 {"v": 1, "stamp": now, "scripts_dir": str(old / "skills" / "zcode-tools" / "scripts"),
                  "python": sys.executable}), encoding="utf-8")
-            (home / ".zcode" / "cli" / "plugins").mkdir(parents=True)
-            (home / ".zcode" / "cli" / "plugins" / "installed_plugins.json").write_text(json.dumps(
+            plugins_dir = home / ".zcode" / "cli" / "plugins"
+            plugins_dir.mkdir(parents=True)
+            installed = plugins_dir / "installed_plugins.json"
+            installed.write_text(json.dumps(
                 {"version": 1, "plugins": [{"id": "zcode-tools@zcode-tools",
-                                            "version": "0.6.43", "installPath": str(inst)}]}),
+                                            "version": "0.6.44", "installPath": str(inst44)}]}),
                 encoding="utf-8")
             harness = (
+                "const fs=require('fs');\n"
                 "const j={handle:(ch,fn)=>{if(ch===\"zcode:inject-status\")global.__h=fn}};\n"
-                # 故意**不预置**一次性守卫：本测试就是要让 spawn 真的触发（惰性桩）
+                # 故意不预置守卫：第一阶段让 spawn 真的触发（惰性桩），消耗守卫
                 + code
-                + "\n(async()=>{const r=await global.__h({}, undefined);"
-                  "process.stdout.write(JSON.stringify({success:r&&r.success,"
-                  "pending:r&&r.pending===true}))})();\n"
+                + "\nconst waitHit=(want)=>new Promise((res,rej)=>{let n=0;"
+                  "const t=setInterval(()=>{n++;"
+                  "try{const h=JSON.parse(fs.readFileSync(" + json.dumps(str(marker)) + ",'utf8')).hit;"
+                  "if(h===want){clearInterval(t);return res(h)}}catch(_){}"
+                  "if(n>40){clearInterval(t);return rej(new Error('marker 未出现: '+want))}},200)});\n"
+                  "(async()=>{"
+                  "await global.__h({}, undefined);"
+                  "const first=await waitHit('inst44');"
+                  # 第二阶段：安装清单改指 0.6.45（=又一次插件更新），同进程内守卫已消耗
+                  "fs.writeFileSync(" + json.dumps(str(installed)) + ", JSON.stringify({version:1,"
+                  "plugins:[{id:'zcode-tools@zcode-tools',version:'0.6.45',"
+                  "installPath:" + json.dumps(str(inst45)) + "}]}) );"
+                  "await global.__h({}, undefined);"
+                  "const second=await waitHit('inst45');"
+                  "process.stdout.write(JSON.stringify({first,second}));"
+                  "})().catch(e=>{console.error(String(e));process.exit(1)});\n"
             )
             with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
                                              encoding="utf-8") as f:
@@ -1667,19 +1694,13 @@ class TestInjectStatusBlock(unittest.TestCase):
                 path = f.name
             try:
                 env = dict(os.environ, USERPROFILE=str(home))
-                r = subprocess.run([node, path], capture_output=True, timeout=30, env=env)
+                r = subprocess.run([node, path], capture_output=True, timeout=60, env=env)
                 self.assertEqual(r.returncode, 0,
                                  f"handler 真跑失败：{(r.stderr or b'')[:400]}")
-                # spawn 是 detached 异步的：轮询等惰性桩落 marker
-                hit = None
-                for _ in range(50):
-                    if marker.is_file():
-                        hit = json.loads(marker.read_text(encoding="utf-8"))["hit"]
-                        break
-                    time.sleep(0.2)
-                self.assertEqual(hit, "installed",
-                                 "补触发必须用安装清单副本（installed_plugins.json），"
-                                 "而非指针里的旧副本")
+                got = json.loads((r.stdout or b"").decode("utf-8", "replace").strip())
+                self.assertEqual(got, {"first": "inst44", "second": "inst45"},
+                                 "两次补触发都必须走安装清单副本；目标变更必须无视"
+                                 "已消耗的守卫（0.6.44 实测缺陷）")
             finally:
                 Path(path).unlink(missing_ok=True)
 
