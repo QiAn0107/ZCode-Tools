@@ -902,12 +902,18 @@ def _tps_snapshot_main_state(blob: bytes | None):
 # 只读 handler：读 sync.py / 看护双写的补丁状态文件。缺文件/损坏 → no-status
 # （渲染层隐藏角标），绝不 throw。
 # ★ stale 补触发（0.6.41）：SessionStart 只在「新会话第一轮」跑 sync——应用刚启动、
-#   用户还没开会话时 status 文件是上一会话的旧结论（插件刚更新时旧值 pending:false
-#   会让角标一直不亮）。所以首次轮询发现文件缺失/损坏/时间戳过期(>30s)时，主进程
-#   按指针文件后台补触发一次 `sync.py --worker`（等效把 SessionStart 的活提前到
-#   应用启动；守卫保证每次运行最多一次，与钩子并发无害）。看护位置只认指针文件——
-#   **生成内容不烤入任何本机路径**（副本间字节一致性红线，0.6.40）；触发全程兜底
-#   静默，任何失败都不影响本 handler 的返回值。
+#   用户还没开会话时 status 文件是上一会话的旧结论。首次轮询发现文件缺失/损坏/
+#   时间戳过期(>30s)时，主进程后台补触发一次 `sync.py --worker`（守卫保证每次运行
+#   最多一次，与钩子并发无害）；触发全程兜底静默，任何失败都不影响本 handler 的
+#   返回值。**生成内容不烤入任何本机路径**（副本间字节一致性红线，0.6.40）。
+# ★★ sync 位置改双源（0.6.43，修「更新插件后角标不亮、重开才亮」）：指针文件要等
+#   新副本跑过一次 sync 才刷新——插件更新后指针仍指旧副本，旧副本的 sync 判客户端
+#   「已一致」写回 pending:false，角标在重开前永远不亮（0.6.42 用户实测）。所以：
+#   ① sync.py 位置改「installed_plugins.json 的 installPath 优先（更新那一刻即更新
+#   的权威来源），指针文件兜底」；② status 文件由 sync/看护带 `syncer_dir`（判定者
+#   副本），handler 发现 syncer_dir ≠ 当前 installPath（路径规整化后比对）即视为
+#   过期立刻补触发——不等 30s 时间戳老化。解释器仍取指针的 python（Electron 的
+#   process.execPath 是 Electron 本体，不能当 Python 用）。
 _INJECT_STATUS_READ_HANDLER = '''
 __H__.handle("zcode:inject-status",async(ev,t)=>{
 try{
@@ -918,14 +924,24 @@ if(s&&typeof s.dataBaseDir=="string"&&s.dataBaseDir.trim())base=s.dataBaseDir.tr
 let f=r.join(base,".zcode","v2","zcode-patches-status.json");
 let st=null;
 try{st=JSON.parse(n.readFileSync(f,"utf-8"))}catch(_){st=null}
-let fresh=!!st&&typeof st.stamp=="number"&&(Date.now()-st.stamp)<30000;
-if(!fresh&&!global.__zpSyncSpawned){
-global.__zpSyncSpawned=!0;
+let norm=(x)=>String(x||"").replace(/\\\\/g,"/").replace(/\\/+$/,"").toLowerCase();
+let inst="";
 try{
+let ip=JSON.parse(n.readFileSync(r.join(base,".zcode","cli","plugins","installed_plugins.json"),"utf-8"));
+let arr=Array.isArray(ip)?ip:(Array.isArray(ip&&ip.plugins)?ip.plugins:[]);
+let e=arr.find((x)=>x&&x.id==="zcode-tools@zcode-tools");
+if(e&&e.installPath&&n.existsSync(r.join(e.installPath,"skills","zcode-tools","scripts","sync.py")))inst=e.installPath;
+}catch(_){inst=""}
 let sp=null;
 try{sp=JSON.parse(n.readFileSync(r.join(base,".zcode","v2","zcode-patches-scripts.json"),"utf-8"))}catch(_){sp=null}
-if(sp&&sp.scripts_dir&&sp.python){
-let sy=r.join(sp.scripts_dir,"sync.py");
+let fresh=!!st&&typeof st.stamp=="number"&&(Date.now()-st.stamp)<30000;
+let drifted=!!(st&&st.syncer_dir&&inst&&norm(st.syncer_dir)!==norm(inst));
+if((!fresh||drifted)&&!global.__zpSyncSpawned){
+global.__zpSyncSpawned=!0;
+try{
+let sdir=inst||(sp&&sp.scripts_dir);
+if(sdir&&sp&&sp.python){
+let sy=inst?r.join(inst,"skills","zcode-tools","scripts","sync.py"):r.join(sp.scripts_dir,"sync.py");
 if(n.existsSync(sy)){
 let{default:c}=await import("node:child_process");
 let ch=c.spawn(sp.python,[sy,"--worker"],{windowsHide:!0,detached:!0,stdio:"ignore"});

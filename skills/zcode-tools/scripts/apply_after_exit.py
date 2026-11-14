@@ -319,7 +319,12 @@ def _write_status(pending: bool, last_error: str | None = None,
     try:
         dest = _import_patcher()._v2_root() / "zcode-patches-status.json"
         data = {"v": 1, "stamp": int(time.time() * 1000),
-                "pending": bool(pending), "items": {}}
+                "pending": bool(pending), "items": {},
+                # ★ 0.6.43：应用者副本（哪个副本的看护写的）。若用户在看护等待期间
+                # 更新了插件，看护写入的是旧副本内容而 installed 已是新副本——渲染层
+                # main handler 对比 syncer_dir ≠ installed installPath 会立刻补触发
+                # 新副本的 sync 重判，不等 30s 时间戳老化。
+                "syncer_dir": str(HERE)}
         if pending and last_error:
             data["last_error"] = last_error
         if phase:

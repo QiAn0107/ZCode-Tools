@@ -482,7 +482,11 @@ def write_patch_status(deferred: dict) -> None:
         import tps_snapshot
         dest = tps_snapshot.resolve_v2_root() / "zcode-patches-status.json"
         data = {"v": 1, "stamp": int(_time.time() * 1000),
-                "pending": bool(deferred), "items": dict(deferred)}
+                "pending": bool(deferred), "items": dict(deferred),
+                # ★ 0.6.43：判定者副本（谁跑的 sync）。渲染层 main handler 据此发现
+                # 「插件已更新但 status 还是旧副本的结论」——旧副本判客户端「已一致」
+                # 写回 pending:false，角标在重开前永远不亮（0.6.42 用户实测）。
+                "syncer_dir": str(HERE)}
         dest.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = _tempfile.mkstemp(dir=str(dest.parent),
                                     prefix=".zpatch-status-", suffix=".tmp")

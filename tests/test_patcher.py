@@ -1448,18 +1448,31 @@ class TestInjectStatusBlock(unittest.TestCase):
             self.assertNotIn(banned, code, f"状态 handler 不得包含 {banned}")
 
     def test_read_handler_respawns_stale_sync(self):
-        """★ 0.6.41：status 缺失/损坏/时间戳过期(>30s)时，主进程按指针文件后台补触发
-        一次 sync --worker。
+        """★ 0.6.41/0.6.43：status 缺失/损坏/时间戳过期(>30s)/判定者漂移时，主进程
+        后台补触发一次 sync --worker。
 
         SessionStart 只在新会话第一轮跑 sync —— 应用刚启动、用户还没开会话时
-        status 是上一会话的旧结论（插件刚更新时旧值 pending:false 会让角标一直
-        不亮，即「角标有时候不显示」）。一次性守卫防重复触发；触发全程兜底
-        静默，任何失败都不影响 handler 返回值；看护位置只认指针文件（副本
-        字节一致性红线）。"""
+        status 是上一会话的旧结论。一次性守卫防重复触发；触发全程兜底静默，任何
+        失败都不影响 handler 返回值；生成内容零本机路径（副本字节一致性红线）。
+        ★ 0.6.43：sync 位置改双源——installed_plugins.json 的 installPath 优先
+        （插件更新那一刻即更新的权威来源），指针文件兜底。0.6.41 只认指针的缺陷：
+        插件更新后指针仍指旧副本，旧副本的 sync 判客户端「已一致」写回
+        pending:false，角标在重开前永远不亮（0.6.42 用户实测）。另有 syncer_dir
+        漂移检测（status 判定者副本 ≠ 当前安装副本 → 立即重判，不等 30s）。"""
         code = zp._INJECT_STATUS_READ_HANDLER
         self.assertIn("30000", code, "stale 判定阈值 30s")
         self.assertIn("__zpSyncSpawned", code, "一次性守卫，每次主进程运行最多触发一次")
-        self.assertIn("zcode-patches-scripts.json", code, "sync 位置只认指针文件")
+        self.assertIn("installed_plugins.json", code, "安装清单 = 当前副本的权威来源")
+        self.assertIn('x.id==="zcode-tools@zcode-tools"', code)
+        self.assertIn("installPath", code)
+        self.assertIn('e.installPath,"skills","zcode-tools","scripts","sync.py"',
+                      code, "installPath 必须做 sync.py 存在性校验")
+        self.assertIn("syncer_dir", code, "判定者漂移检测")
+        self.assertIn("drifted", code)
+        self.assertIn("norm(", code, "路径规整化后比对（分隔符/大小写）")
+        self.assertIn("zcode-patches-scripts.json", code, "指针文件兜底 + python 来源")
+        self.assertIn("sdir=inst||(sp&&sp.scripts_dir)", code,
+                      "安装清单优先，指针兜底")
         self.assertIn('"--worker"', code)
         self.assertIn("windowsHide", code)
         self.assertIn("detached:!0", code)
@@ -1600,6 +1613,76 @@ class TestInjectStatusBlock(unittest.TestCase):
         finally:
             Path(path).unlink(missing_ok=True)
 
+    def test_respawn_targets_installed_copy_not_stale_pointer(self):
+        """端到端钉死 0.6.42 的实测缺陷：插件已更新（installed=新副本）、status 是
+        旧副本的结论（pending:false + 时间戳新鲜 + syncer_dir=旧副本）——handler
+        必须从**安装清单副本**补触发 sync，而不是指针里的旧副本（旧副本判客户端
+        「已一致」→ 角标重开前永远不亮）。
+
+        做法：假家目录（USERPROFILE 指向 tempdir）里摆好三件套——installed_plugins.json
+        （installPath=新副本）、status（syncer_dir=旧副本）、指针（scripts_dir=旧副本 +
+        真解释器）；两个副本各放一个**惰性 sync.py 桩**（只写 marker 就退出），真跑
+        handler 后断言 marker 来自安装清单副本。桩进程只写一个文件，无 schtasks/看护。"""
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("no node")
+        code = zp._inject_status_main_block("j").decode()
+        with tempfile.TemporaryDirectory(prefix="zpatch-inst-", ignore_cleanup_errors=True) as d:
+            home = Path(d)
+            inst = home / "cache" / "zt" / "0.6.43"      # 安装清单指向的「新副本」
+            old = home / "cache" / "zt" / "0.6.42"       # 指针指向的「旧副本」
+            marker = home / "marker.json"
+            for root, hit in ((inst, "installed"), (old, "pointer")):
+                sd = root / "skills" / "zcode-tools" / "scripts"
+                sd.mkdir(parents=True)
+                (sd / "sync.py").write_text(
+                    "import json\n"
+                    f"json.dump({{'hit': {hit!r}}}, open(r'{marker}', 'w', encoding='utf-8'))\n",
+                    encoding="utf-8")
+            v2 = home / ".zcode" / "v2"
+            v2.mkdir(parents=True)
+            now = int(time.time() * 1000)
+            (v2 / "zcode-patches-status.json").write_text(json.dumps(
+                {"v": 1, "stamp": now, "pending": False, "items": {},
+                 "syncer_dir": str(old)}), encoding="utf-8")
+            (v2 / "zcode-patches-scripts.json").write_text(json.dumps(
+                {"v": 1, "stamp": now, "scripts_dir": str(old / "skills" / "zcode-tools" / "scripts"),
+                 "python": sys.executable}), encoding="utf-8")
+            (home / ".zcode" / "cli" / "plugins").mkdir(parents=True)
+            (home / ".zcode" / "cli" / "plugins" / "installed_plugins.json").write_text(json.dumps(
+                {"version": 1, "plugins": [{"id": "zcode-tools@zcode-tools",
+                                            "version": "0.6.43", "installPath": str(inst)}]}),
+                encoding="utf-8")
+            harness = (
+                "const j={handle:(ch,fn)=>{if(ch===\"zcode:inject-status\")global.__h=fn}};\n"
+                # 故意**不预置**一次性守卫：本测试就是要让 spawn 真的触发（惰性桩）
+                + code
+                + "\n(async()=>{const r=await global.__h({}, undefined);"
+                  "process.stdout.write(JSON.stringify({success:r&&r.success,"
+                  "pending:r&&r.pending===true}))})();\n"
+            )
+            with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                             encoding="utf-8") as f:
+                f.write(harness)
+                path = f.name
+            try:
+                env = dict(os.environ, USERPROFILE=str(home))
+                r = subprocess.run([node, path], capture_output=True, timeout=30, env=env)
+                self.assertEqual(r.returncode, 0,
+                                 f"handler 真跑失败：{(r.stderr or b'')[:400]}")
+                # spawn 是 detached 异步的：轮询等惰性桩落 marker
+                hit = None
+                for _ in range(50):
+                    if marker.is_file():
+                        hit = json.loads(marker.read_text(encoding="utf-8"))["hit"]
+                        break
+                    time.sleep(0.2)
+                self.assertEqual(hit, "installed",
+                                 "补触发必须用安装清单副本（installed_plugins.json），"
+                                 "而非指针里的旧副本")
+            finally:
+                Path(path).unlink(missing_ok=True)
+
     def test_blocks_coexist_with_others(self):
         """四块共用锚点互不干扰，摘除注入状态块不伤其它块。"""
         blob = (b'_.contextBridge.exposeInMainWorld("zcode",{'
@@ -1681,10 +1764,15 @@ class TestPatchStatusFile(unittest.TestCase):
                 data = json.loads((Path(d) / "zcode-patches-status.json").read_text(encoding="utf-8"))
                 self.assertTrue(data["pending"])
                 self.assertEqual(data["items"], {"tps_footer": True, "model_puller": False})
+                # ★ 0.6.43：判定者副本——渲染层 handler 据此发现「插件已更新但 status
+                # 还是旧副本的结论」，立即补触发新副本 sync（不再等 30s 时间戳老化）
+                self.assertTrue(str(data["syncer_dir"]).replace("/", "\\").endswith("scripts"),
+                                f"syncer_dir 应为判定副本的 scripts 目录: {data.get('syncer_dir')}")
                 sync.write_patch_status({})
                 data = json.loads((Path(d) / "zcode-patches-status.json").read_text(encoding="utf-8"))
                 self.assertFalse(data["pending"])
                 self.assertEqual(data["items"], {})
+                self.assertIn("syncer_dir", data)
             finally:
                 tps_snapshot.resolve_v2_root = orig
 
@@ -1717,6 +1805,10 @@ class TestPatchStatusFile(unittest.TestCase):
                 data = json.loads((Path(d) / "zcode-patches-status.json").read_text(encoding="utf-8"))
                 self.assertEqual(data["phase"], "正在写入补丁…")
                 self.assertTrue(data["pending"])
+                # ★ 0.6.43：应用者副本（哪个副本的看护写的）——等待期插件更新后
+                # 渲染层可据此发现「看护写的是旧副本内容」，立刻补触发新副本重判
+                self.assertTrue(str(data["syncer_dir"]).replace("/", "\\").endswith("scripts"),
+                                f"syncer_dir 应为看护副本的 scripts 目录: {data.get('syncer_dir')}")
                 aae._write_status(False, phase="完成")
                 data = json.loads((Path(d) / "zcode-patches-status.json").read_text(encoding="utf-8"))
                 self.assertEqual(data["phase"], "完成")
@@ -1724,6 +1816,7 @@ class TestPatchStatusFile(unittest.TestCase):
                 aae._write_status(False)          # 不带 phase → 不写字段
                 data = json.loads((Path(d) / "zcode-patches-status.json").read_text(encoding="utf-8"))
                 self.assertNotIn("phase", data)
+                self.assertIn("syncer_dir", data)
             finally:
                 zp._v2_root = orig
 

@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.42-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.43-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -150,6 +150,13 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.43（修「插件更新后角标不亮、重开才亮」：sync 定位改双源 + 判定者漂移检测）
+- **根因（0.6.42 用户实测）**：0.6.41 的 stale 补触发按**指针文件**定位 sync.py —— 指针由上一次跑 sync 的副本写入，插件更新后仍指向**旧版本副本**；补触发跑的是旧副本的 sync，它判客户端匹配**旧副本**内容 →「已一致」→ 写回 `pending:false`，角标要等重开 ZCode 后新副本的 SessionStart 才亮；
+- **修复①sync 定位双源**：`installed_plugins.json` 的 `installPath` 优先（客户端在**更新那一刻**就改写的权威来源，实测 0.6.42 更新即指向 0.6.42），指针文件兜底；解释器仍取指针的 `python`（Electron 的 process.execPath 不能当 Python 用）；
+- **修复②判定者漂移检测**：status 文件新增 `syncer_dir`（sync 与看护都写「谁产出的这份结论」），handler 发现 syncer_dir ≠ 当前 installPath（路径规整化后比对）→ **即使时间戳新鲜也立即重判**，消灭「更新后 30s 内 stamp 还新鲜」的窗口；
+- **端到端测试真抓到一个拼接 bug**：installPath 是**插件根**，spawn 路径漏拼 `skills/zcode-tools/scripts` 段 → ENOENT 被 `ch.on("error")` 静默吞掉 → 补触发无声失效 —— 若非真跑断言（假家目录 + installed 清单 + 两个惰性 sync 桩 + 真 handler，断言 marker 来自安装清单副本）必然带病发布；
+- **测试**：全量 365 项通过（新增端到端 respawn 钉子、READ handler 双源断言、syncer_dir 断言）；发布前泄漏终验：跑套件后无新进程、真实副本日志/指针/状态文件零污染。
 
 #### 0.6.42（TPS 结算层实时化：移植参考实现的「DB 一变就重算 + 主动推送」链路 + 权威 tok/s 兜底）
 - **刷新不及时根因**：快照新鲜度由钩子节奏决定（Stop 每轮 / PostToolUse 30s 节流 / SessionStart），没有任何机制「DB 一变就重算」——长回合中事件层漏采（scid 关联失败 / pending 回放失败）时轮/步/用量要冻到下次结算，最坏 30s+；渲染层再叠 3s TTL 拉取；

@@ -102,12 +102,19 @@ python "<skill目录>/scripts/doctor.py" --where  # 只查「插件装在哪」+
 - **`--check` 并行跑**（0.6.41）：`run_sync` 用线程池并发跑全部 wanted 键的 `--check`
   （纯只读子进程、互相独立），4 项串行 ≈10s → ≈3s——status 文件在全部 check 完成后才写，
   这 10s 直接拖后角标亮起时间。判定循环仍按 `PATCHES` 原序串行（`run_patcher` 保持串行）。
-- **主进程 stale 补触发**（0.6.41）：`SessionStart` 只在**新会话第一轮**触发——应用刚启动、
-  用户还没开会话时 status 文件是上一会话的旧结论（插件刚更新时旧值 `pending:false` 会让
-  角标一直不亮）。所以 `zcode:inject-status` 只读 handler 发现 status 缺失/损坏/时间戳
-  过期(>30s)时，按**指针文件**后台补触发一次 `sync.py --worker`（守卫保证每次主进程运行
-  最多一次；`windowsHide+detached+stdio:ignore`，失败静默不影响返回值）。sync 位置只认
-  指针文件，**生成内容依旧零本机路径**（副本字节一致性红线）。
+- **主进程 stale 补触发**（0.6.41，0.6.43 修定位源）：`SessionStart` 只在**新会话第一轮**
+  触发——应用刚启动、用户还没开会话时 status 文件是上一会话的旧结论（插件刚更新时旧值
+  `pending:false` 会让角标一直不亮）。所以 `zcode:inject-status` 只读 handler 发现 status
+  缺失/损坏/时间戳过期(>30s)**或判定者漂移**时，后台补触发一次 `sync.py --worker`
+  （守卫保证每次主进程运行最多一次；`windowsHide+detached+stdio:ignore`，失败静默不影响
+  返回值）。**sync 位置是双源**：`installed_plugins.json` 的 `installPath` 优先（插件更新
+  那一刻即更新的权威来源；拼路径必须补 `skills/zcode-tools/scripts` 段——installPath 是
+  **插件根**不是 scripts 目录），指针文件兜底；解释器仍取指针的 `python`（Electron 的
+  process.execPath 不能当 Python 用）。0.6.41 只认指针的缺陷：插件更新后指针滞后一版，
+  旧副本的 sync 判客户端「已一致」写回 `pending:false`，角标在重开前永远不亮（0.6.42
+  用户实测）。判定者漂移 = status 的 `syncer_dir`（sync/看护写入「谁写的」）≠ 当前
+  installPath（路径规整化后比对）→ 即使时间戳新鲜也立即重判。
+  **生成内容依旧零本机路径**（副本字节一致性红线）。
 - **退出后注入进度可见**（0.6.41）：看护检测到 ZCode 退出、开始应用时，弹黑底金字
   tkinter 进度小卡（右下角置顶，与角标同语言），逐步显示 TPS 快照 → 各补丁批写入
   （完成/失败）→ 指纹刷新 → 重启 ZCode；成功 ~1.5s 自动关窗，**失败常驻到用户点掉**。
