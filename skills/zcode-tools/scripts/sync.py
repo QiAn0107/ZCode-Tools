@@ -45,7 +45,6 @@ WATCHDOG = HERE / "apply_after_exit.py"
 # Windows 用一次性计划任务启动看护：Task Scheduler 启动的进程不在 ZCode 的
 # Job 对象里，ZCode 退出时不会被 KILL_ON_JOB_CLOSE 连带结束。
 SCHTASK_NAME = "ZCodePatchApply"
-SCHTASK_CMD = HERE / "_watchdog_task.cmd"
 CONFIG = Path.home() / ".zcode" / "cli" / "config.json"
 # 插件 id 会随安装方式变化（本地 dev-default-xxxx、市场安装的 id 等），
 # 因此按前缀匹配而不是写死某个 id —— 换台机器/换安装方式也能正确定位配置。
@@ -377,7 +376,16 @@ def _start_watchdog_task(args: list[str]) -> bool:
 
     任务只负责「立即启动一次」：/Run 后立刻 /Delete 定义 —— 删除定义不会
     终止已在运行的实例（实测），也避免 23:59 占位时间到点后再拉一份。
-    命令写进短路径 .cmd，避开 schtasks /TR 的 262 字符限制。
+
+    ★ 0.6.40：/TR 直接给「pythonw + apply_after_exit.py」两个带引号路径，
+    **不再写 .cmd 中间文件**。两个原因：
+      ① Task Scheduler 以 UTF-16 存任务动作，天然免疫「cmd.exe 按 ANSI 解析
+         .cmd、非 ASCII 安装路径变乱码」的坑（0.6.38 角标链路实测）；
+      ② .cmd 方案会在整个看护等待期挂一个**可见的 cmd.exe 控制台窗口**
+        （Task Scheduler 以交互方式跑 console 程序，用户 0.6.39 实测截图），
+        pythonw 是 GUI 子系统，直接跑不弹任何窗口。
+    /TR 不带 --want 参数（带全量参数有 262 字符上限风险）：看护自行合并
+    _watchdog.want（start_watchdog 在调度前已写入）。
     """
     kw = {"capture_output": True, "encoding": "utf-8", "errors": "replace",
           "timeout": 30}
@@ -386,16 +394,12 @@ def _start_watchdog_task(args: list[str]) -> bool:
         pyw = Path(exe).with_name("pythonw.exe")
         if pyw.is_file():
             exe = str(pyw)          # GUI 子系统：计划任务里不闪控制台
-        # start /wait 让 .cmd 一直持有看护进程，任务实例不会提前结束；
-        # 删除任务定义只删计划项，不会杀掉这个已启动的进程。
-        body = ("@echo off\r\n"
-                + f'start "" /wait "{exe}" "{WATCHDOG}" ' + " ".join(args) + "\r\n")
-        try:
-            SCHTASK_CMD.write_text(body, encoding="mbcs")
-        except Exception:
-            SCHTASK_CMD.write_text(body, encoding="utf-8")
+        tr = f'"{exe}" "{WATCHDOG}"'
+        if len(tr) > 250:
+            log(f"/TR 命令行过长（{len(tr)} 字符），回退分离进程")
+            return False
         created = subprocess.run(
-            ["schtasks", "/Create", "/TN", SCHTASK_NAME, "/TR", f'"{SCHTASK_CMD}"',
+            ["schtasks", "/Create", "/TN", SCHTASK_NAME, "/TR", tr,
              "/SC", "ONCE", "/ST", "23:59", "/F"], **kw, **no_window_kwargs())
         if created.returncode != 0:
             log(f"计划任务创建失败（回退分离进程）: {created.stdout}{created.stderr}")
@@ -408,7 +412,7 @@ def _start_watchdog_task(args: list[str]) -> bool:
         cleaned = subprocess.run(["schtasks", "/Delete", "/TN", SCHTASK_NAME, "/F"],
                                  **kw, **no_window_kwargs())
         if cleaned.returncode != 0:
-            log(f"计划任务清理失败（不影响本次看护）: {cleaned.stdout}{cleaned.stderr}")
+            log(f"计划任务清理失败（不影响本次看护）: {cleaned.stderr}")
         return True
     except Exception as exc:
         log(f"计划任务启动异常（回退分离进程）: {exc!r}")

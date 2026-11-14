@@ -1448,19 +1448,27 @@ class TestInjectStatusBlock(unittest.TestCase):
         for banned in ("sqlite", "fetch(", "httpsMod", "XMLHttpRequest"):
             self.assertNotIn(banned, code, f"apply handler 不得联网: {banned}")
 
-    def test_apply_handler_paths_are_baked(self):
-        """看护脚本/解释器路径必须在注入期由 Python 烤成字面量（渲染层无法自行定位
-        插件 scripts 目录；占位符残留 = 运行时写错位置）。"""
+    def test_apply_handler_is_copy_independent(self):
+        """★ 0.6.40 回归：生成的注入内容**不得含任何本机路径**。
+
+        此前把插件副本的 scripts 目录/解释器在注入期烤进 JS —— cache、marketplaces、
+        开发仓库三个副本烤入的字节不同，副本间互判「含旧版组件」→ 应用→判旧→重排
+        死循环（0.6.39 实测两代旧看护赛跑）。看护位置运行时只读指针文件
+        zcode-patches-scripts.json，生成内容与副本无关。"""
         code = zp._inject_status_main_block("j").decode()
         self.assertNotIn("__WDIR__", code)
         self.assertNotIn("__PY__", code)
         self.assertNotIn("__WDOG__", code)
+        self.assertNotIn(str(Path(__file__).resolve().parent), code,
+                         "生成内容不得含本插件副本的本机路径")
+        self.assertIn("zcode-patches-scripts.json", code, "看护位置运行时读指针文件")
+        self.assertIn("no-pointer", code, "指针缺失必须结构化报错引导重启")
+
+    def test_pointer_is_the_only_watchdog_source(self):
+        code = zp._INJECT_STATUS_APPLY_HANDLER
+        self.assertIn('code:"no-pointer"', code)
+        self.assertIn("existsSync", code, "指针指向的看护脚本必须存在性校验")
         self.assertIn("apply_after_exit.py", code)
-        # GUI 子系统优先 pythonw.exe（计划任务不闪控制台）；本机没有 pythonw 时
-        # 退回 python.exe 也合法，故仅在存在时断言
-        pyw = Path(sys.executable).with_name("pythonw.exe")
-        if pyw.is_file():
-            self.assertIn("pythonw", code)
 
     def test_handler_does_not_use_ipc_arguments(self):
         """回归：handler 第二参数是渲染层实参，不是 path 模块（0.6.26 的坑）。"""
@@ -2197,13 +2205,6 @@ class TestWatchdogScheduledTask(unittest.TestCase):
     def setUp(self):
         import sync
         self.sync = sync
-        self._tmp = tempfile.TemporaryDirectory(prefix="zpatch-task-", ignore_cleanup_errors=True)
-        self._orig_cmd = sync.SCHTASK_CMD
-        sync.SCHTASK_CMD = Path(self._tmp.name) / "_watchdog_task.cmd"
-
-    def tearDown(self):
-        self.sync.SCHTASK_CMD = self._orig_cmd
-        self._tmp.cleanup()
 
     def _fake_run(self, calls, fail_on=None):
         class R:
@@ -2217,6 +2218,12 @@ class TestWatchdogScheduledTask(unittest.TestCase):
         return run
 
     def test_uses_schtasks_create_run_delete(self):
+        """★ 0.6.40：/TR 直接给「pythonw + 看护脚本」两个带引号路径，不再写 .cmd。
+
+        .cmd 方案的两宗罪（均实测）：① Node/不同写手若用 UTF-8 写 .cmd，cmd.exe
+        按 ANSI 解析 → 非 ASCII 安装路径变乱码 → 看护静默夭折；② Task Scheduler
+        以交互方式跑 .cmd，整个看护等待期挂一个可见 cmd.exe 控制台窗口。直接
+        /TR 走 UTF-16 任务存储，pythonw 是 GUI 子系统不弹窗。"""
         from unittest import mock
         calls = []
         with mock.patch.object(self.sync.subprocess, "run", self._fake_run(calls)):
@@ -2228,14 +2235,11 @@ class TestWatchdogScheduledTask(unittest.TestCase):
         self.assertIn("/SC", create)
         self.assertIn("ONCE", create)
         self.assertIn("/F", create)
-        # 命令写进短路径 .cmd，避开 /TR 的 262 字符限制
         tr = create[create.index("/TR") + 1]
-        self.assertEqual(tr, f'"{self.sync.SCHTASK_CMD}"')
-        body = self.sync.SCHTASK_CMD.read_text(encoding="utf-8", errors="replace")
-        self.assertIn("apply_after_exit.py", body)
-        self.assertIn("--want=tps_footer=on", body)
-        self.assertIn("start", body)
-        self.assertIn("/wait", body)
+        self.assertIn("pythonw", tr, "优先 pythonw.exe（GUI 子系统不闪控制台）")
+        self.assertIn("apply_after_exit.py", tr)
+        self.assertNotIn("--want", tr, "/TR 不带 --want（262 字符上限风险，看护合并 WANT_FILE）")
+        self.assertNotIn(".cmd", tr, "不得再落 .cmd 中间文件")
         self.assertEqual(run[:3], ["schtasks", "/Run", "/TN"])
         self.assertEqual(run[3], self.sync.SCHTASK_NAME)
         self.assertEqual(delete[:3], ["schtasks", "/Delete", "/TN"])

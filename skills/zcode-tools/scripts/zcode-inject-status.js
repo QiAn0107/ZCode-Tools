@@ -31,6 +31,7 @@
   // 应用失败的 code → 用户可读文案
   const FAIL_TEXT = {
     "not-pending": "当前没有待写入的补丁",
+    "no-pointer": "看护脚本指针缺失，请重启 ZCode 后重试",
     "schedule-failed": "启动看护失败（计划任务创建失败），已取消退出",
     "run-failed": "启动看护失败（计划任务启动失败），已取消退出",
   };

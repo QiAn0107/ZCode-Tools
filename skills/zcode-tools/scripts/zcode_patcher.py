@@ -869,17 +869,17 @@ return{success:!0,pending:st.pending,items:st.items||{},stamp:st.stamp,lastError
 '''
 
 # 「退出并应用」handler：确认弹窗后由渲染层调用。顺序即安全边界——
-#   ① 复核 pending（不 pending 拒绝退出）；② 定位看护脚本：优先 sync.py 最新登记的
-#   指针文件 zcode-patches-scripts.json（插件升级后烤入路径会过期，甚至指向开发
-#   仓库副本——0.6.38 实测），失效再退回注入期烤入路径；③ schtasks /Create+/Run，
+#   ① 复核 pending（不 pending 拒绝退出）；② 定位看护脚本：**只认** sync.py 每次同步
+#   写的指针文件 zcode-patches-scripts.json（★ 0.6.40 起不再烤入任何路径——烤入路径
+#   使各副本生成的注入内容字节不同，副本间互判「含旧版组件」造成应用→判旧→重排
+#   的死循环，0.6.39 实测），指针缺失 → 结构化报错引导重启；③ schtasks /Create+/Run，
 #   /TR 直接给出「pythonw + apply_after_exit.py」两个带引号路径——**不落 .cmd 中间
-#   文件**：Task Scheduler 以 UTF-16 存任务，天然避开「cmd.exe 按 ANSI 解析 .cmd、
-#   非 ASCII 安装路径变乱码」的坑（0.6.38 实测：UTF-8 写 .cmd → GBK 解析 → 看护
-#   静默夭折 → 退出后无人注入拉起）；/TR 不带 --want → 看护合并 _watchdog.want；
-#   任何一步失败都原样返回、绝不退出；④ 200ms 后 app.quit()（先让 IPC 响应回到
-#   渲染层），quit 被应用自身拦截时 5s 后 app.exit(0) 兜底强退。
-#   __WDIR__/__PY__/__WDOG__ 由 Python 在注入期烤入本插件 scripts 目录与解释器路径
-#   （仅作指针失效时的兜底）。
+#   文件**（Task Scheduler 以 UTF-16 存任务，避开 ANSI 解析乱码坑；且 pythonw 是
+#   GUI 子系统，不弹可见 cmd 窗口——0.6.39 实测 .cmd 方案会在整个等待期挂一个
+#   cmd 控制台）；/TR 不带 --want → 看护合并 _watchdog.want；/Create//Run 结果追加
+#   进看护日志（[apply-now] 行）；任何一步失败都原样返回、绝不退出；④ 200ms 后
+#   app.quit()（先让 IPC 响应回到渲染层），quit 被应用自身拦截时 5s 后 app.exit(0)
+#   兜底强退。
 _INJECT_STATUS_APPLY_HANDLER = r'''
 __H__.handle("zcode:apply-patches-now",async(ev,t)=>{
 try{
@@ -890,13 +890,10 @@ if(s&&typeof s.dataBaseDir=="string"&&s.dataBaseDir.trim())base=s.dataBaseDir.tr
 let f=r.join(base,".zcode","v2","zcode-patches-status.json");
 let st=null;try{st=JSON.parse(n.readFileSync(f,"utf-8"))}catch(_){st=null}
 if(!st||st.pending!==!0)return{success:!1,code:"not-pending",error:"当前没有待写入的补丁"};
-let wdir=__WDIR__,py=__PY__,wdg=__WDOG__;
-try{
-let sp=JSON.parse(n.readFileSync(r.join(base,".zcode","v2","zcode-patches-scripts.json"),"utf-8"));
-if(sp&&sp.scripts_dir&&sp.python){
-let cand=r.join(sp.scripts_dir,"apply_after_exit.py");
-if(n.existsSync(cand)){wdir=sp.scripts_dir;py=sp.python;wdg=cand}
-}}catch(_){}
+let sp=null;try{sp=JSON.parse(n.readFileSync(r.join(base,".zcode","v2","zcode-patches-scripts.json"),"utf-8"))}catch(_){sp=null}
+if(!sp||!sp.scripts_dir||!sp.python)return{success:!1,code:"no-pointer",error:"看护脚本指针缺失，请重启 ZCode 让同步刷新后再试"};
+let wdir=sp.scripts_dir,py=sp.python,wdg=r.join(wdir,"apply_after_exit.py");
+if(!n.existsSync(wdg))return{success:!1,code:"no-pointer",error:"看护脚本不存在（"+wdg+"），请重启 ZCode 或重装插件"};
 let tr='"'+py+'" "'+wdg+'"';
 if(tr.length>250)return{success:!1,code:"schedule-failed",error:"计划任务命令行过长（"+tr.length+" 字符），请反馈日志"};
 let sk=(a)=>c.spawnSync("schtasks",a,{windowsHide:!0,timeout:15000});
@@ -915,21 +912,6 @@ return{success:!0}
 '''
 
 
-def _watchdog_launch_paths() -> tuple[str, str, str]:
-    """(看护工作目录, 解释器, 看护脚本绝对路径)，供 apply-now handler 烤进 JS。
-
-    解释器取 patcher 自身运行所用的 sys.executable —— 看护正是用真解释器拉起本
-    脚本的，路径即当下真实值；GUI 子系统优先 pythonw.exe（计划任务不闪控制台，
-    与 sync._start_watchdog_task 的选择一致）。
-    """
-    exe = Path(sys.executable or "python")
-    pyw = exe.with_name("pythonw.exe")
-    if pyw.is_file():
-        exe = pyw
-    here = Path(__file__).resolve().parent
-    return str(here), str(exe), str(here / "apply_after_exit.py")
-
-
 def _inject_status_preload_block(electron_alias: str) -> bytes:
     """暴露 2 个桥方法：getInjectStatus()（读状态）与 applyPatchesNow()（退出并应用）。"""
     e = electron_alias
@@ -939,13 +921,14 @@ def _inject_status_preload_block(electron_alias: str) -> bytes:
 
 
 def _inject_status_main_block(ipc_alias: str) -> bytes:
-    wdir, py, wdg = _watchdog_launch_paths()
+    """★ 0.6.40 起生成内容**不含任何本机路径**（看护脚本位置运行时读指针文件）。
+
+    此前把插件副本的 scripts 目录/解释器在注入期烤进 JS——不同副本（cache /
+    marketplaces / 开发仓库）烤入的字节不同，副本间互判「含旧版组件」→ 应用→判旧
+    →重排死循环（0.6.39 实测两代旧看护赛跑、0.6.39 同步永远判 stale）。生成内容
+    与副本无关后，同一版本的任何副本注入结果完全一致。"""
     body = _INJECT_STATUS_READ_HANDLER.replace("__H__", ipc_alias)
-    body += "\n" + (_INJECT_STATUS_APPLY_HANDLER
-                    .replace("__H__", ipc_alias)
-                    .replace("__WDIR__", json.dumps(wdir))
-                    .replace("__PY__", json.dumps(py))
-                    .replace("__WDOG__", json.dumps(wdg)))
+    body += "\n" + _INJECT_STATUS_APPLY_HANDLER.replace("__H__", ipc_alias)
     return _wrap_block(INJECT_STATUS_BLOCK, body.encode())
 
 

@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.39-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.40-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -150,6 +150,12 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.40（根治「注入→判旧→重排」死循环：生成内容副本无关 + sync 排期灭掉可见 cmd 窗口）
+- **死循环根因（日志实锤）**：apply-now handler 把插件副本的 scripts 目录/解释器在**注入期烤进**生成的 JS——cache / marketplaces / 开发仓库三个副本烤入的字节不同，任一副本应用后，其它副本的同步必判「含旧版组件」→ 应用→判旧→重排死循环；实测两代旧看护（0.6.38 副本 + 开发仓库副本）在同一退出点赛跑，仓库副本抢先写入旧内容并重启，角标于是再次亮起；
+- **修复①生成内容副本无关**：apply-now handler **不再烤入任何本机路径**——看护脚本位置只读指针文件 `<v2>/zcode-patches-scripts.json`（sync 每次同步写、`existsSync` 校验），缺失回 `no-pointer` 结构化报错引导重启；同一版本的任何副本注入结果**字节完全一致**；
+- **修复②sync 排期灭掉可见 cmd 窗口**：sync 自己的排期此前仍走 `.cmd` 包装——Task Scheduler 以交互方式跑 .cmd，整个看护等待期挂一个**可见 cmd.exe 控制台**（用户实测截图）。现 `sync._start_watchdog_task` 同样直写 `/TR "pythonw" "apply_after_exit.py"`（不带 `--want` 参数避免 262 字符上限，看护合并 `_watchdog.want`），pythonw 为 GUI 子系统全程零窗口；残留的 `_watchdog_task.cmd` 文件与可见 cmd 进程已清理；
+- **测试**：全量 345 项通过；新增「生成内容副本无关」回归钉（不得含本插件副本本机路径）、`TestWatchdogScheduledTask` 断言改写（/TR 直写、无 .cmd、无 --want）。
 
 #### 0.6.39（修注入状态角标首战两雷：点击退出后看护静默夭折 / 拉起后角标残留；看护链路加固）
 - **雷①：点角标关闭 ZCode 后无人注入拉起**——「退出并应用」handler 写的看护启动 `.cmd` 用 Node 默认 **UTF-8**，而 cmd.exe 按 **ANSI/GBK** 解析 `.cmd`，安装路径含中文（`实用小工具`）时变乱码 `瀹炵敤灏忓伐鍏穃` → pythonw 静默夭折、看护日志一片空白。**修复**：彻底不落 `.cmd` 中间文件——`schtasks /TR` 直接给「pythonw + apply_after_exit.py」两个带引号路径（Task Scheduler 以 UTF-16 存任务，天然免疫代码页）；/Create、/Run 结果强制追加进看护日志（`[apply-now]` 行），静默失败从此有迹可循；
