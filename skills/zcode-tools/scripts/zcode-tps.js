@@ -322,8 +322,14 @@
         "@media (prefers-color-scheme: dark){",
         ":root:not(.light):not([data-theme='light']) [data-ztps-menu]",
         "{--ztps-bg:#1e1e1e;--ztps-fg:#e8e8e8}}",
-        "/* 状态点呼吸灯(0.6.49):仅 opacity,合成器动画零重排零重绘 */",
-        "@keyframes ztpsBreath{0%,100%{opacity:.35}50%{opacity:1}}",
+        "/* 状态点呼吸灯(0.6.50 v2):opacity+transform 走合成器,text-shadow 只重绘 11px 小点。",
+        "曲线=吸入(0→30% 渐暗)→停顿(30~55% 低位)→呼出(55→100% 回亮);0% 从全亮起步,",
+        "接入瞬间与上一帧(空闲全亮绿)无缝衔接,不闪跳。 */",
+        "@keyframes ztpsBreath{",
+        "0%{opacity:1;transform:scale(1);text-shadow:0 0 2px rgba(245,158,11,.25)}",
+        "30%{opacity:.4;transform:scale(1.14);text-shadow:0 0 8px rgba(245,158,11,.9)}",
+        "55%{opacity:.4;transform:scale(1.14);text-shadow:0 0 8px rgba(245,158,11,.9)}",
+        "100%{opacity:1;transform:scale(1);text-shadow:0 0 2px rgba(245,158,11,.25)}}",
         "/* 模型弹窗扁平列表宽度自适应保障 */",
         "[data-radix-popper-content-wrapper] [role='menu'].w-48,",
         "[data-radix-popper-content-wrapper] [role='listbox'].w-48,",
@@ -560,9 +566,9 @@
     if (!Number.isFinite(n)) return "0.00";
     return (Math.round(n * 100 + 1e-9) / 100).toFixed(2);
   };
-  // ---------- 渐变色（0.6.47/0.6.48 用户口径）----------
-  // tok/s:0→红、400→紫,中间线性插值;命中率:0%→橙、100%→绿(命中高=省钱)。
-  // 两端钳制;亮/暗主题下 #ef4444/#a855f7/#f97316/#22c55e 均可读。
+  // ---------- 渐变色（0.6.51 用户口径）----------
+  // tok/s:0→红、300→紫,中间线性插值;命中率:0%→红、100%→绿(命中高=省钱)。
+  // 两端钳制;亮/暗主题下 #ef4444/#a855f7/#22c55e 均可读。
   const mixHex = (a, b, t) => {
     const k = Math.max(0, Math.min(1, t));
     const rgb = [0, 1, 2].map((i) => {
@@ -572,9 +578,9 @@
     });
     return "#" + rgb.join("");
   };
-  const TPS_GRAD_MAX = 400;
+  const TPS_GRAD_MAX = 300;
   const colorTps = (v) => mixHex("#ef4444", "#a855f7", (v || 0) / TPS_GRAD_MAX);
-  const colorHit = (pct) => mixHex("#f97316", "#22c55e", (pct || 0) / 100);
+  const colorHit = (pct) => mixHex("#ef4444", "#22c55e", (pct || 0) / 100);
   const fmtStamp = (ms) => {
     if (ms == null) return null;
     const d = new Date(ms), now = new Date();
@@ -746,7 +752,7 @@
   let diag = null;
   try {
     diag = window.__ztpsDiag = window.__ztpsDiag || {};
-    diag.scriptVersion = "3.26-dotbreath";
+    diag.scriptVersion = "3.29-redhit300";
     diag.loadedAt = new Date().toISOString();
   } catch (err) { /* ignore */ }
 
@@ -1037,6 +1043,20 @@
         return;
       }
       const pill = host.firstChild;
+      // 状态点跨重建规则（0.6.50 根因修复）：从 DOM 摘下再挂回会重启 CSS 动画——
+      // 流式中 tok/s 每变一次就重建一次胶囊，呼吸灯表现为一闪一闪。
+      // 所以两条重建路径（数据态/空态）都只清旧段，状态点永远留在 DOM 里。
+      const ensureDot = () => {
+        let dot = pill._zdot;
+        if (!dot) {
+          dot = document.createElement("span");
+          dot.textContent = "●";
+          pill._zdot = dot;
+        }
+        for (const n of Array.from(pill.childNodes)) if (n !== dot) n.remove();
+        if (!dot.isConnected) pill.appendChild(dot);
+        return dot;
+      };
       if (!hasData) {
         // 空态:仅绿点,今日有消耗则附带总耗;右键切位置等交互照常
         const ekey = "empty|" + today.key + "|" + today.total;
@@ -1045,11 +1065,11 @@
           pill._zsegs = [];
           pill.style.background = "rgba(127,127,127,0.08)";
           pill.style.padding = "0 10px";
-          pill.innerHTML = "";
-          const dot = document.createElement("span");
-          dot.textContent = "●";
+          const dot = ensureDot();
+          dot._zbusy = false;
           dot.style.color = "#4ade80";
-          pill.appendChild(dot);
+          dot.style.textShadow = "";
+          dot.style.animation = "";
           if (today.total > 0) {
             const sep = document.createElement("span");
             sep.textContent = "│";
@@ -1095,7 +1115,22 @@
         pill.style.background = "rgba(127,127,127,0.08)";
         pill.style.padding = "0 10px";
         pill.style.color = "var(--color-foreground-subtle, var(--ztps-dim, #5b6470))";
-        pill.innerHTML = "";
+        // 状态点常驻（0.6.49 用户口径）：对话运行中=琥珀呼吸灯，空闲=绿色静态。
+        // ensureDot 只清旧段、绝不把状态点摘下 DOM（0.6.50 根因修复）：
+        // 摘下再挂回会重启 CSS 动画——流式中 tok/s 每次变化都重建一次胶囊，
+        // 呼吸灯就表现为一闪一闪；状态样式只在 streaming 翻转时切换。
+        const dot = ensureDot();
+        if (dot._zbusy !== !!s.streaming) {
+          dot._zbusy = !!s.streaming;
+          if (s.streaming) {
+            dot.style.color = "#f59e0b";
+            dot.style.animation = "ztpsBreath 2.4s ease-in-out infinite";
+          } else {
+            dot.style.color = "#4ade80";
+            dot.style.textShadow = "";
+            dot.style.animation = "";
+          }
+        }
         const VALUE = "var(--color-foreground, var(--ztps-fg, #1b1f24))";
         const span = (txt, cls) => {
           const sp = document.createElement("span");
@@ -1103,33 +1138,12 @@
           if (cls === "VALUE") sp.style.color = VALUE;
           return sp;
         };
-        // 状态点常驻（0.6.49 用户口径）：对话运行中=琥珀呼吸灯，空闲=绿色静态。
-        // 点节点跨重建复用（pill._zdot）：流式中 tok/s 每次变化都会重建 pill（innerHTML=""），
-        // 若每次新建节点，CSS 动画会不断从头播，呼吸感失效——只在 streaming 翻转时改状态。
-        let dot = pill._zdot;
-        if (!dot) {
-          dot = span("●");
-          pill._zdot = dot;
-        }
-        if (dot._zbusy !== !!s.streaming) {
-          dot._zbusy = !!s.streaming;
-          if (s.streaming) {
-            dot.style.color = "#f59e0b";
-            dot.style.textShadow = "0 0 6px rgba(245,158,11,.8)";
-            dot.style.animation = "ztpsBreath 1.6s ease-in-out infinite";
-          } else {
-            dot.style.color = "#4ade80";
-            dot.style.textShadow = "";
-            dot.style.animation = "";
-          }
-        }
-        pill.appendChild(dot);
         // 段布局:即时指标(g0:首 token/tok/s)+ 会话累计(g1:轮数/步数/输入/输出/平均命中)+ 今日总耗(g2:总耗)。
         // 组间用竖线分隔,组内用 · ;不显示时间(用户不需要)
         segs = [];
         if (s.ttft != null && s.ttft >= 0) segs.push({ p: 1, g: 0, nodes: [span("首 token "), span(fmtLat(s.ttft), "VALUE")] });
         if (s.tps != null) {
-          // 速度渐变（0.6.48 用户口径）：0 tok/s→红、400→紫，随流式/结算值实时变化
+          // 速度渐变（0.6.51 用户口径）：0 tok/s→红、300→紫，随流式/结算值实时变化
           const sp = span(fmtTps(s.tps) + " tok/s");
           sp.style.color = colorTps(s.tps);
           segs.push({ p: 2, g: 0, nodes: [sp] });
@@ -1142,7 +1156,7 @@
         if (agg.output > 0) segs.push({ p: 6, g: 1, nodes: [span("输出 "), span(fmtTok(agg.output), "VALUE")] });
         if (agg.input > 0) {
           const pct = (agg.cache / agg.input) * 100;
-          // 命中率渐变（语义色）：0%→橙（命中低=贵）、100%→绿（命中高=省钱）
+          // 命中率渐变（语义色）：0%→红（命中低=贵）、100%→绿（命中高=省钱）
           const sp = span(" 平均命中 " + fmtPct(pct) + "%");
           sp.style.color = colorHit(pct);
           segs.push({ p: 5.6, g: 1, nodes: [sp] });

@@ -124,9 +124,9 @@ check(/agg\.rounds,\s*agg\.steps,\s*agg\.input,\s*agg\.cache.*agg\.output,[\s\S]
 check(/for \(const drop of \[7, 1, 2, 3\]\)/.test(src),
       "渐进降级顺序不对:应先丢总耗(7),再丢首 token(1)/tok/s(2),轮步(3)最后");
 
-// ---------- ④ 速度/命中率渐变色（0.6.47/0.6.48 用户口径）真跑 ----------
-// tok/s:0→红(#ef4444)、400→紫(#a855f7),中间线性插值,两端钳制;
-// 命中率:0%→橙(#f97316)、100%→绿(#22c55e,命中高=省钱)。渲染路径必须经 colorTps/colorHit
+// ---------- ④ 速度/命中率渐变色（0.6.51 用户口径）真跑 ----------
+// tok/s:0→红(#ef4444)、300→紫(#a855f7),中间线性插值,两端钳制;
+// 命中率:0%→红(#ef4444)、100%→绿(#22c55e,命中高=省钱)。渲染路径必须经 colorTps/colorHit
 // 着色,不得残留固定 ACCENT;内容签名已含 s.tps 与 agg.cache/input,色随值自动重绘。
 function extractDecl(kind, name) {
   const head = kind + " " + name + " = ";
@@ -156,16 +156,16 @@ if (colorDecls.every(Boolean)) {
     check(false, "渐变色模块源码无法求值", err.message);
   }
   if (colors) {
-    const ORANGE = "#f97316", PURPLE = "#a855f7", GREEN = "#22c55e", RED = "#ef4444";
-    check(colors.colorTps(0) === RED, "colorTps(0) 应为红端（0.6.48：0 时改红）", colors.colorTps(0));
-    check(colors.colorTps(400) === PURPLE, "colorTps(400) 应为紫端（用户口径 400 tok/s）", colors.colorTps(400));
-    check(colors.colorTps(200) === "#cc4d9e", "colorTps(200) 应为红紫线性中点", colors.colorTps(200));
+    const PURPLE = "#a855f7", GREEN = "#22c55e", RED = "#ef4444";
+    check(colors.colorTps(0) === RED, "colorTps(0) 应为红端", colors.colorTps(0));
+    check(colors.colorTps(300) === PURPLE, "colorTps(300) 应为紫端（0.6.51 用户口径 300 tok/s）", colors.colorTps(300));
+    check(colors.colorTps(150) === "#cc4d9e", "colorTps(150) 应为红紫线性中点", colors.colorTps(150));
     check(colors.colorTps(1000) === PURPLE && colors.colorTps(-50) === RED,
-          "速度两端必须钳制（>400 与负值都不得越出红紫区间）");
-    check(colors.colorHit(0) === ORANGE, "colorHit(0) 应为橙端", colors.colorHit(0));
+          "速度两端必须钳制（>300 与负值都不得越出红紫区间）");
+    check(colors.colorHit(0) === RED, "colorHit(0) 应为红端（0.6.51 用户口径：命中率红→绿）", colors.colorHit(0));
     check(colors.colorHit(100) === GREEN, "colorHit(100) 应为绿端", colors.colorHit(100));
-    check(colors.colorHit(84) === "#44b852", "colorHit(84) 应为橙绿线性插值", colors.colorHit(84));
-    check(colors.colorTps(10) !== colors.colorTps(300) && colors.colorHit(20) !== colors.colorHit(90),
+    check(colors.colorHit(84) === "#43b05a", "colorHit(84) 应为红绿线性插值", colors.colorHit(84));
+    check(colors.colorTps(10) !== colors.colorTps(200) && colors.colorHit(20) !== colors.colorHit(90),
           "渐变随速度/命中率变化失效");
   }
 }

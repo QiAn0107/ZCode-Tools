@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.49-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.51-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -151,9 +151,20 @@ run.cmd                        # Windows
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
 
+#### 0.6.51（渐变锚点微调：命中率 0% 橙→红（红→绿），tok/s 紫端 400→300）
+- 用户口径：平均命中率渐变 0% 由橙改**红** `#ef4444`（红→绿语义色，命中高=省钱）；tok/s 紫端由 400 提前到 **300 tok/s**（`TPS_GRAD_MAX` 300，中点 150 = `#cc4d9e`）；两端钳制不变；
+- 测试：全量 366 项通过；pct-smoke §④ 断言同步（hit(0) 红 / hit(84)=`#43b05a` / tps(300) 紫 / tps(150) 中点 / >300 钳制），`scriptVersion` 3.28-dotstable→3.29-redhit300。
+
+#### 0.6.50（呼吸灯自然度重做：吸入→停顿→呼出曲线 + 2.4s 节奏 + 光晕/缩放随呼吸起伏 + 无缝接入）
+- 用户反馈「呼吸灯不够自然」。旧曲线（0.6.49）三帧对称 + 1.6s，是节拍器式三角波，且接入瞬间从全亮直接跳到 35% 亮度会闪跳；光晕恒定不随呼吸起伏；
+- **新曲线**（`ztpsBreath` v2）：`0% 全亮 → 30% 渐暗（吸入）→ 30~55% 低位停顿 → 55~100% 回亮（呼出）`，2.4s 周期——真呼吸的「吸入-停顿-呼出」节奏；`0% 从 opacity:1 起步`，与空闲态的全亮无缝衔接，接入瞬间零闪跳；
+- 光晕（text-shadow .25→.9）与轻微缩放（scale 1→1.14）随呼吸同步起伏；opacity+transform 走合成器，text-shadow 只重绘 11px 小点，开销可忽略；
+- 测试：全量 366 项通过；daily-smoke §⑩ 断言升级（0% 全亮起步/缩放与光晕存在/2.4s 节奏），`scriptVersion` 3.26-dotbreath→3.27-softbreath。
+
 #### 0.6.49（状态点呼吸灯：对话运行中=琥珀呼吸灯，空闲=绿色静态）
 - 用户口径：左侧状态点从「常绿、流式加静态光晕」改为**生成中琥珀呼吸灯**（`#f59e0b` + `ztpsBreath` keyframes，1.6s 呼吸周期）、**空闲绿色静态**（`#4ade80`，动画清零）；空态（无数据）仍为绿点；
-- **实现关键**：呼吸动画只动 `opacity`（合成器动画，零重排零重绘）；状态点节点跨 pill 重建复用（`pill._zdot` + `dot._zbusy` 按 streaming 翻转才改状态）——流式中 tok/s 每次变化都会 `innerHTML=""` 重建胶囊，若每次新建节点，CSS 动画会不断从头播、呼吸感失效；
+- **实现关键（两处）**：① 呼吸动画只动 `opacity`+`transform`（合成器动画，零重排零重绘）；② **状态点永远留在 DOM 里**——重建路径改为「只清旧段」（`ensureDot`：非状态点子节点逐一摘除，状态点不摘、未挂载才挂），因为**从 DOM 摘下再挂回本身就会重启 CSS 动画**（0.6.49 实测：流式中 tok/s 每变一次重建一次，呼吸灯表现为一闪一闪）；0.6.49 的「节点复用」不够——复用节点只要重挂动画照样从头播；
+- 曲线与节奏见 0.6.50 主条目：`0% 全亮起步` 与空闲态无缝衔接（接入零闪跳）；空态路径同样保留状态点（空↔数据态切换不清点）；
 - 测试：全量 366 项通过；daily-smoke 新增 §⑩（keyframes 存在/节点复用/动画挂载与清空/双色断言），`scriptVersion` 3.25-red0→3.26-dotbreath。
 
 #### 0.6.48（配色微调：tok/s 0 端橙→红 `#ef4444`，渐变变红→紫；命中率橙→绿不变）
