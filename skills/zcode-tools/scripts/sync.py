@@ -17,19 +17,22 @@
   sync.py            人工调试用：前台执行，输出直接打在终端上
 
 为什么要后台化：hook 是**内联**执行的（`async` 字段当前无运行时效果），
-同步一次要跑多次 `--check`（每次约 2 秒），会话启动会被硬生生拖住；
-而且钩子有超时上限，机器慢/杀软扫盘时可能直接被砍掉，表现为「什么都没发生」。
+同步一次要跑多次 `--check`（每次 ≈0.3s；客户端/源文件未变时命中结论缓存直接跳过），
+会话启动仍会被拖住；而且钩子有超时上限，机器慢/杀软扫盘时可能直接被砍掉，
+表现为「什么都没发生」。
 
 诊断日志：scripts/_sync.log
 心跳文件：scripts/_sync.last（每次被调用都刷新，用来证明「钩子到底跑没跑」）
 安装自检：python doctor.py（一条命令给出整条链路的结论）
 """
 
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -60,6 +63,23 @@ STAMP = HERE / "_sync.last"
 MARKER = HERE / "_autoinject.done"
 # 客户端指纹记录：用来检测「ZCode 客户端是否刚升级过」
 CLIENT_FINGERPRINT = HERE / "_client_fingerprint.json"
+
+# 同步预检结论缓存：客户端 asar 与注入源文件都没变时，直接复用上次的 check_state
+# 结论，跳过 4 个 `--check` 子进程（单个 ≈0.3s / ≈44MB 峰值，4 个并发 ≈1.2s CPU）。
+# 这是 SessionStart 的常规路径：绝大多数会话启动时客户端根本没有变化。
+SYNC_STATE = HERE / "_sync_state.json"
+SYNC_CACHE_VERSION = 1
+# 测试里必须置 False：单元测试用桩替换 check_state，不能让上一次真实结论被复用
+# （否则测试之间的状态互相污染，且永远测不到真实检查分支）。
+SYNC_CACHE_ENABLED = True
+# 参与缓存键的注入源文件：任何一个内容变化（插件升级/修脚本）都必须重新检查。
+SYNC_SOURCE_FILES = (
+    "zcode_patcher.py",
+    "zcode-tps.js",
+    "zcode-enhance-prompt.js",
+    "zcode-model-puller.js",
+    "zcode-inject-status.js",
+)
 
 # 配置键 -> (zcode_patcher.py 参数, 是否重打包级)
 PATCHES = [
@@ -307,6 +327,96 @@ def check_state(args) -> str:
     if "已打" in out:
         return "on"
     return "unknown"
+
+
+def _cache_fingerprint() -> dict | None:
+    """同步预检缓存的键：asar 指纹 + 注入源文件哈希 + 判定逻辑版本。
+
+    ★ 为什么必须包含源文件哈希：插件市场「更新」只换插件目录，不会重注入 asar。
+    如果只按 asar 指纹缓存，升级后源脚本变了、结论却复用旧的「已一致」→ 又回到
+    0.6.1 那个「插件更新了但永远不生效」的静默失效。源文件哈希让升级后的第一次
+    SessionStart 必定重新检查（得到 stale）。
+
+    读 5 个小文件（合计 ≈200KB）+ 一次安装探测（ctypes，≈13ms），远低于一次
+    `--check`（≈0.3s）；拿不到 asar 或源文件时返回 None（缓存直接不启用）。
+    """
+    try:
+        sys.path.insert(0, str(HERE))
+        import zcode_patcher as zp
+        asars = zp._resolve_asars(None)
+    except Exception:
+        return None
+    if not asars:
+        return None
+    asar_items = []
+    for a in asars:
+        try:
+            st = a.stat()
+        except OSError:
+            return None
+        asar_items.append([str(a.resolve()), st.st_size, st.st_mtime_ns])
+    sources = {}
+    for name in SYNC_SOURCE_FILES:
+        try:
+            sources[name] = hashlib.sha256((HERE / name).read_bytes()).hexdigest()
+        except OSError:
+            return None
+    return {"asars": asar_items, "sources": sources, "logic": SYNC_CACHE_VERSION}
+
+
+def load_cached_states(keys: list[str], fingerprint: dict) -> dict | None:
+    """命中缓存则返回 {key: state}；任何不确定（无缓存/指纹变化/缺键/unknown）都返回 None。
+
+    只缓存「客户端里到底是什么状态」这个事实，和用户开关无关；unknown 一律不缓存，
+    避免一次瞬时失败被永久当成结论。
+    """
+    if not SYNC_CACHE_ENABLED or not keys or fingerprint is None:
+        return None
+    try:
+        data = json.loads(SYNC_STATE.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict) or data.get("fingerprint") != fingerprint:
+        return None
+    states = data.get("states")
+    if not isinstance(states, dict) or set(keys) - set(states):
+        return None
+    out = {k: states[k] for k in keys}
+    if any(v == "unknown" for v in out.values()):
+        return None
+    return out
+
+
+def store_cached_states(states: dict, fingerprint: dict) -> None:
+    """把一次「全部状态明确且没有发生写入」的预检结论写盘（原子替换）。
+
+    `fingerprint` 必须是**检查开始时**算出的那份：检查期间客户端可能被看护改写
+    （用户正好退出），此时结论对应的是旧 asar，不能拿新指纹去缓存——写盘前再算一次，
+    不一致就放弃本次缓存。
+    """
+    if not SYNC_CACHE_ENABLED or not states or fingerprint is None:
+        return
+    if _cache_fingerprint() != fingerprint:
+        log("检查期间客户端指纹发生变化，跳过本次结论缓存")
+        return
+    data = {"v": SYNC_CACHE_VERSION, "fingerprint": fingerprint,
+            "states": dict(states), "stamp": int(time.time())}
+    try:
+        SYNC_STATE.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(SYNC_STATE.parent),
+                                   prefix=".zsync-state-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+            os.replace(tmp, SYNC_STATE)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except Exception as e:
+        log(f"同步状态缓存写入失败（不影响结果）: {e!r}")
 
 
 # 判定「真的没写成」的**精确**特征串。
@@ -582,12 +692,24 @@ def run_sync(echo: bool = False) -> str:
     wanted_keys = [(key, args, repack, wanted[key])
                    for key, args, repack in PATCHES if key in wanted]
     states: dict = {}
+    probe_fp = None
+    checked = False
     if wanted_keys:
-        with ThreadPoolExecutor(max_workers=min(4, len(wanted_keys))) as pool:
-            futs = [(key, pool.submit(check_state, args))
-                    for key, args, _, _ in wanted_keys]
-            for key, fut in futs:
-                states[key] = fut.result()
+        probe_fp = _cache_fingerprint()
+        cached = (load_cached_states([key for key, _, _, _ in wanted_keys], probe_fp)
+                  if probe_fp is not None else None)
+        if cached is not None:
+            # 常规路径：客户端和注入源文件都没变 → 直接复用上次结论，不起任何子进程
+            states = cached
+            log(f"预检命中缓存（客户端 asar 与注入源文件均未变化），"
+                f"跳过 {len(cached)} 个 --check 子进程")
+        else:
+            checked = True
+            with ThreadPoolExecutor(max_workers=min(4, len(wanted_keys))) as pool:
+                futs = [(key, pool.submit(check_state, args))
+                        for key, args, _, _ in wanted_keys]
+                for key, fut in futs:
+                    states[key] = fut.result()
 
     changed, deferred, failed, skipped, refreshed = [], {}, [], [], []
     for key, args, repack, want in wanted_keys:
@@ -664,6 +786,11 @@ def run_sync(echo: bool = False) -> str:
         except Exception as e:
             log(f"TPS 快照刷新失败（已降级为纯事件流）: {e!r}")
 
+    # 预检结论缓存：只在「真的跑过检查 + 状态全部明确 + 本次没有任何写入/延期/失败」时写盘。
+    # 有写入/延期时 asar 会变（size/mtime），指纹自然失效，不需要也不应该写。
+    if checked and states and not changed and not deferred and not failed:
+        store_cached_states(states, probe_fp)
+
     parts = []
     if changed:
         parts.append("已写入: " + "、".join(changed))
@@ -688,7 +815,12 @@ def run_sync(echo: bool = False) -> str:
 
 
 def get_client_fingerprint() -> dict:
-    """获取当前 ZCode 客户端安装指纹（版本号、asar 路径、大小与修改时间）。"""
+    """获取当前 ZCode 客户端安装指纹（版本号、asar 路径、大小与修改时间）。
+
+    ★ 版本号只在 asar 变化时重新解析：`asar_version()` 要读 8.3MB 的 asar header
+    并 json.loads（本机 ≈60ms），而本函数位于 `--detach` 的**会话启动内联路径**上。
+    指纹文件里已有同一份 (路径, size, mtime) 时直接复用 version，日常启动省掉这一跳。
+    """
     try:
         sys.path.insert(0, str(HERE))
         import zcode_patcher as zp
@@ -697,12 +829,28 @@ def get_client_fingerprint() -> dict:
             return {}
         asar = asars[0]
         stat = asar.stat()
-        ver = str(zp.asar_version(asar) or "")
+        path = str(asar.resolve())
+        mtime = int(stat.st_mtime)
+        mtime_ns = stat.st_mtime_ns
+        try:
+            old = json.loads(CLIENT_FINGERPRINT.read_text(encoding="utf-8"))
+        except Exception:
+            old = None
+        ver = ""
+        if (isinstance(old, dict) and old.get("asar_path") == path
+                and old.get("size") == stat.st_size
+                and old.get("mtime") == mtime
+                and old.get("mtime_ns") in (None, mtime_ns)
+                and old.get("version")):
+            ver = str(old["version"])
+        if not ver:
+            ver = str(zp.asar_version(asar) or "")
         return {
-            "asar_path": str(asar.resolve()),
+            "asar_path": path,
             "version": ver,
             "size": stat.st_size,
-            "mtime": int(stat.st_mtime),
+            "mtime": mtime,
+            "mtime_ns": mtime_ns,
         }
     except Exception:
         return {}

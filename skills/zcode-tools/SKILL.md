@@ -73,7 +73,7 @@ python "<skill目录>/scripts/doctor.py" --where  # 只查「插件装在哪」+
 插件在 ZCode 的「设置 → 插件 → 已安装 → 点开插件 → 高级信息 → 配置」里声明了 3 个开关。**不拨也能用**：没保存过配置时按清单默认值（全开）注入。拨动开关并点「保存配置」后，插件会在**下次会话启动时登记期望状态**，再由 `apply_after_exit.py` 在 **ZCode 退出时写入**客户端（写完自动重启 ZCode），不需要手动跑命令（插件的安装方式见仓库 README 的「安装」章节）：
 
 > **为什么三项一律等退出**：`zcode_patcher.py` 的运行预检是**全局**的 —— `zcode_running()` 只查
-> `tasklist` 里有没有 `ZCode.exe`，与 target 无关，命中就直接 `return 2` 拒绝写入（app.asar 被锁、
+> Windows 上枚举进程名（ctypes `EnumProcesses`，不可用时回退 `tasklist`），看有没有 `ZCode.exe`，与 target 无关，命中就直接 `return 2` 拒绝写入（app.asar 被锁、
 > `config.json` / `provider_config.json` 会被客户端回写覆盖）。而会话钩子**必然**在 ZCode 运行中触发，
 > 所以「会话内立即生效」这条路走不通。`sync.py` 的策略是**先试立即写，被拒就自动转交退出后看护**，
 > 这样纯 CLI 场景（没有 ZCode.exe 在跑）仍能即时生效。
@@ -98,10 +98,19 @@ python "<skill目录>/scripts/doctor.py" --where  # 只查「插件装在哪」+
   最后却报成「已生效」。默认值全开之后这个误报每次装完都会出现，必须单独成一态、只标注不执行。
 - **钩子是「登记心跳 + 后台化」就返回**（`sync.py --detach` → 子进程 `--worker`）。
   原因：hook 是**内联**执行的（`async` 字段当前无运行时效果），而同步要跑多次 `--check`
-  （每次约 2 秒），同步做完再返回会拖住会话启动，还可能撞上钩子超时被砍掉。
+  （每次 ≈0.3s；常规启动命中结论缓存时直接跳过），同步做完再返回仍会拖住会话启动，
+  还可能撞上钩子超时被砍掉。
 - **`--check` 并行跑**（0.6.41）：`run_sync` 用线程池并发跑全部 wanted 键的 `--check`
-  （纯只读子进程、互相独立），4 项串行 ≈10s → ≈3s——status 文件在全部 check 完成后才写，
-  这 10s 直接拖后角标亮起时间。判定循环仍按 `PATCHES` 原序串行（`run_patcher` 保持串行）。
+  （纯只读子进程、互相独立），判定循环仍按 `PATCHES` 原序串行（`run_patcher` 保持串行）。
+  status 文件在全部 check 完成后才写，所以并行也决定了角标的亮起时间。
+- **预检结论缓存（0.6.54）**：asar 指纹（路径/size/mtime_ns）+ 5 个注入源文件 sha256 +
+  判定逻辑版本都没变时，`run_sync` 直接复用上次的 `check_state` 结论，**跳过全部 `--check`**
+  （4 个子进程 ≈1.2s CPU / 4×44MB 峰值 → 一次 ≈25ms 指纹比对）。任何写入/延期/`unknown`
+  都不写缓存；asar 或源脚本一变（客户端升级、插件更新、看护写入）指纹立即失效——
+  避免重现「插件更新了却复用『已一致』」的静默失效（0.6.1 老坑）。
+- **Windows 进程探测走 ctypes（0.6.54）**：`EnumProcesses` + `QueryFullProcessImageNameW`
+  取进程路径（实测 ≈2.4ms），不再每次 spawn PowerShell（≈986ms）或 `tasklist`（≈320ms）；
+  不可用时回退原命令，判定口径不变。
 - **主进程 stale 补触发**（0.6.41，0.6.43 修定位源）：`SessionStart` 只在**新会话第一轮**
   触发——应用刚启动、用户还没开会话时 status 文件是上一会话的旧结论（插件刚更新时旧值
   `pending:false` 会让角标一直不亮）。所以 `zcode:inject-status` 只读 handler 发现 status
@@ -442,10 +451,10 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 
 统计条右键弹出自绘菜单，**0.6.52 起仅可在「输入框上方（默认）/ 输入框下方」两项间切换**，`localStorage`（键 `ztps-pos`）记忆，重开保持；旧的 `toolbar`/`session-top` 值校验失败自动回落到「输入框上方」：
 
-- **输入框上方（0.6.52 起默认）**：composer 卡片之前的独立行（`insertAdjacentElement("beforebegin", host)`），`alignSelf: stretch` 与输入框同宽；间距走镜像 `fitGapAbove`：量「胶囊下沿↔卡片上沿」用 `marginBottom` 增量抵到 `GAP_TARGET=2px`（只撤自己插入的空白、不吞应用原生间距），前面有兄弟元素时对称补 `marginTop`；不用 `translateY`（上方无「容器底边框沉入」场景，避免把 sticky 输入框容器顶穿）。
+- **输入框上方（0.6.52 起默认）**：composer 卡片之前的独立行（`insertAdjacentElement("beforebegin", host)`），`alignSelf: stretch` 与输入框同宽；有排队消息时锚点上移到 `data-testid="v4-queue"` 容器（它靠 `-mb-7 pb-7` 与卡片拼成一体，节点插在两者之间会露出平底边），见 `aboveAnchor()`；间距走镜像 `fitGapAbove`：量「胶囊下沿↔锚点上沿」用 `marginBottom` 增量抵到 `GAP_TARGET=2px`（只撤自己插入的空白、不吞应用原生间距），前面有兄弟元素时对称补 `marginTop`；不用 `translateY`（上方无「容器底边框沉入」场景，避免把 sticky 输入框容器顶穿）。
 - **输入框下方**：composer 卡片之后的独立行（`insertAdjacentElement("afterend", host)`），**实测像素间距对齐**（0.6.27）：不再猜父容器 `gap`（Tailwind `space-y-*`／margin 布局读不到，0.6.25 的 `rowGap` 方案会静默失效），挂载后量「胶囊上沿↔卡片下沿」「胶囊下沿↔下一元素」，用 `marginTop/marginBottom` **增量**抵到 `GAP_TARGET=2px`（绝对值反算会在 0 与 -gap 间自激振荡），偏差 <0.5px 即停写；**末位元素另走视觉位移**（0.6.29）：胶囊是父容器最后一个子元素时负 `marginBottom` 只压缩容器总高、不会让胶囊下移，改用 `translateY(min(父边框盒底−胶囊下沿−2, 16))` 沉进 padding；快路径 1s 节流重量，布局/窗口/主题变化自动跟随。
 - 数据层零改动，仅挂载点不同；挂载点找不到（空态/设置页）时自清理，`window.__ztpsDiag.posMode`/`hiddenReason` 可诊断。右键修复注记：菜单用 pointerdown 捕获关外部点击时必须放行菜单内部按下，否则 click 在已移除节点上落空、选项永远点不中。
-- **上方模式防回归（0.6.52 布局塌陷修复）**：`findComposerInput` 会对排序后的候选逐个做 `isRealComposerCard` 校验——必须在主会话 frame 内、不在 `role=dialog` / `aria-modal` / 问题卡内、不在 `section[data-turn-id]` 消息轮次里，且位于 composer dock（或至少不在 `[data-v4-timeline-scroll]` 滚动层）；通用 `textarea` 兜底只有在卡片通过校验后才采用。问题卡/弹窗期间真实 composer 不可用时状态条隐藏，关闭后 500ms 内自动挂回。`fitGapAbove`/`fitGap` 只补偿 `|gap| ≤ MAX_FIT_GAP=32px` 的**紧邻**卡片；中间夹了其它节点、实测间距超限或已有 margin 超限时一律清零并跳过——绝不写出几百 px 负 margin 把 sticky dock 拉塌。诊断：`__ztpsDiag.inputVia/cardTestid/cardInDock/fitAbove`。
+- **上方模式防回归（0.6.52 布局塌陷修复 + 0.6.54 排队锚点）**：`findComposerInput` 会对排序后的候选逐个做 `isRealComposerCard` 校验——必须在主会话 frame 内、不在 `role=dialog` / `aria-modal` / 问题卡内、不在 `section[data-turn-id]` 消息轮次里，且位于 composer dock（或至少不在 `[data-v4-timeline-scroll]` 滚动层）；通用 `textarea` 兜底只有在卡片通过校验后才采用。问题卡/弹窗期间真实 composer 不可用时状态条隐藏，关闭后 1s 巡检内自动挂回。`fitGapAbove`/`fitGap` 只补偿 `|gap| ≤ MAX_FIT_GAP=32px` 的**紧邻**锚点；中间夹了其它节点、实测间距超限或已有 margin 超限时一律清零并跳过——绝不写出几百 px 负 margin 把 sticky dock 拉塌。诊断：`__ztpsDiag.inputVia/cardTestid/cardInDock/fitAbove`。
 
 ### 数据链路原理（无常驻服务）
 
@@ -930,7 +939,7 @@ Python 侧 `tests/test_patcher.py::TestEnhancePromptScript`
 * ZCode 是**多进程**（主进程 / 渲染 / GPU / 工具进程），主窗口关了常留
   若干 `ZCode.exe` 子进程（本机实测残留过 14 个）。
 
-`zcode_running()` 只判「`tasklist` 里有无 `ZCode.exe`」，有残留即为真 →
+`zcode_running()` 只判「进程表里有无 `ZCode.exe`」（ctypes 枚举，回退 `tasklist`），有残留即为真 →
 看护一直等（`MAX_WAIT_SEC = 24h`）→ **永不写入** → 用户必须再来一轮。
 
 **新增的可观测性（doctor 第 7.5 节）**：`_apply_after_exit.log` 是唯一判据。
@@ -1088,8 +1097,8 @@ Electron 加载时按 `integrity` 校验，不匹配就**拒绝加载该模块**
 
 * `bootstrap.py`：`pip install` / `git clone` 一旦上游半开连接就永久挂起 →
   默认 1200s，超时退 **124**（与 GNU timeout 一致）并带出部分输出。
-* `apply_after_exit.py`：看护是**后台无人值守**进程 → `tasklist` 30s、
-  补丁 600s。**`tasklist` 超时必须按「仍在运行」处理** ——
+* `apply_after_exit.py`：看护是**后台无人值守**进程 → 进程探测（ctypes；回退 `tasklist` 30s）、
+  补丁 600s。**进程探测超时/失败必须按「仍在运行」处理** ——
   反过来会在 asar 还被锁时动手写，且此时已错过退出时机，补丁永远写不进去，
   现象与[「看护从未等到退出」](#为什么有时要重启两遍才生效062-新增第-75-节)完全一样。
 

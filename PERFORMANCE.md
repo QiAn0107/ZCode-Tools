@@ -1,8 +1,8 @@
 # 运行时性能优化记录
 
 - 日期：2026-11-20
-- 范围：`zcode-toolkit` 的 asar 检查/注入、TPS 快照、看护轮询、注入到渲染层的四个脚本、插件 hooks
-- 版本：随 `0.6.53` 发布
+- 范围：`zcode-toolkit` 的 asar 检查/注入、开关同步、TPS 快照、看护轮询、注入到渲染层的四个脚本、插件 hooks
+- 版本：第一轮随 `0.6.53` 发布；第二轮（进程探测/同步缓存）随 `0.6.54` 发布
 
 ## 测量环境
 
@@ -109,6 +109,78 @@ spawn `tasklist`），最长等 24h。
 结论：保留逐会话路径，并在 `build_snapshot()` docstring 里写明这次实测，避免
 以后又按“查询数越少越好”重做一遍。
 
+## 第二轮（0.6.54）
+
+第二轮针对「每次会话启动 / 每次轮询都会跑」的系统调用与重复检查。
+
+### 6. Windows 进程探测改 ctypes（最大收益）
+
+旧实现有两条子进程探测：
+
+- `_from_running_processes()` 用 **PowerShell** `Get-Process | Select Path` 找客户端安装位置；
+  **每个 `--check` 子进程**都会跑一次；
+- `zcode_running()` 用 **tasklist** 判断 ZCode 是否在运行，**看护每 3–10s** 跑一次。
+
+本机实测单次开销：PowerShell **986ms**、tasklist **320ms**（都是进程启动成本）。
+
+新实现 `_win_process_paths()`：`EnumProcesses` + `QueryFullProcessImageNameW`
+（ctypes，无子进程，**2.4ms**）。取不到（非 Windows / 老系统 / 权限异常）时回退原命令，
+判定口径不变（进程名 `ZCode.exe`）。
+
+| 指标 | 优化前 | 优化后 |
+|---|---|---|
+| 安装位置探测（每次 `--check`） | 986ms | 2.4ms |
+| `zcode_running()`（看护每次轮询） | 320ms | 2.5–3.5ms |
+| 看护 24h 进程探测 CPU（≈8,700 次） | ≈46 分钟 | ≈22 秒 |
+| 单个 `--check`（含启动） | 1.31s | 0.30s |
+| `--check --all`（4 补丁） | 1.71s | 0.49s |
+
+`--check --all` 的剩余时间主要是 Python 启动 + 读 asar 条目 + 正则比对，不再是进程探测。
+
+### 7. SessionStart 预检结论缓存
+
+`sync.py --worker` 每次会话启动都跑 4 个 `--check`（≈0.3s CPU / ≈44MB 峰值每个）。
+但**绝大多数会话启动时客户端和插件都没有变化**，这 4 次检查的结论必然与上次相同。
+
+`run_sync()` 现在先算缓存键：
+
+```
+asar 列表 [(绝对路径, size, mtime_ns), …]
++ 5 个注入源文件 sha256（zcode_patcher.py / tps / enhance / puller / inject-status）
++ SYNC_CACHE_VERSION
+```
+
+命中则直接复用上次的 `{补丁: on/off/na}` 结论，**一个子进程都不起**；否则并行跑 4 个
+`--check`，并在「状态全部明确 + 本次没有任何写入/延期/失败」时写回 `_sync_state.json`。
+
+| 场景 | 优化前 | 优化后 |
+|---|---|---|
+| 常规会话启动（客户端/插件未变） | 4 进程、≈1.2s CPU、4×44MB 峰值 | 一次指纹比对 ≈25ms |
+| 客户端升级 / 插件更新 / 看护写入后首次启动 | 4 进程 | 4 进程（指纹必然失效，重新检查） |
+
+失效条件覆盖了所有已知的「客户端状态会变」的来源：看护写入、`--revert`、客户端升级都会
+改变 asar 的 size/mtime；插件更新会改变源文件哈希。`unknown`（瞬时失败）从不写缓存。
+这样既拿回启动开销，又不会重现 0.6.1 的「插件更新了但结论还是已一致」静默失效。
+
+### 8. 客户端指纹复用版本号
+
+`sync.py --detach` 在**会话启动内联路径**上调 `get_client_fingerprint()`，其中
+`asar_version()` 要读 8.3MB header 再 `json.loads`（≈60ms）。指纹文件里已有同一份
+`(路径, size, mtime)` 时直接复用 `version`，日常启动省掉这次解析；asar 一旦变化
+（size/mtime 不同）照旧重新读取。
+
+### 9. asar header 单进程复用
+
+同一次 `--check --all` 里 `_read_asar_header()` 会被调用 5 次（版本号 + 4 个补丁），
+每次 `json.loads` 8.3MB ≈22ms。新增按 `(path, size, mtime_ns)` 校验的进程内缓存，
+只读路径共享同一份解析结果；**重打包路径显式 `use_cache=False`**，因为它会原地改写
+header 树（插入/删除条目、重排 offset）。
+
+| 指标 | 优化前 | 优化后 |
+|---|---|---|
+| `--check --all` header 解析次数 | 5 | 1 |
+| `--check --all` 耗时 | 0.69s | 0.49s |
+
 ## 复现
 
 ```bash
@@ -124,14 +196,21 @@ with contextlib.redirect_stdout(io.StringIO()):
  rc=zp.main()
 print('rc=%s peak=%.1fMB' % (rc, tracemalloc.get_traced_memory()[1]/1048576))"
 
-# 全量回归（本次：378 tests OK，6 skipped）
+# 第二轮：进程探测 / 同步缓存的耗时都在同一支基准里（Windows 才测 PowerShell/tasklist）
+python tests/bench_perf.py
+
+# 全量回归（本次：387 tests OK，6 skipped）
 python -m unittest discover -s tests -v
 ```
 
 ## 回滚与边界
 
-- 所有改动目前**未提交**；先用 `git diff` 审阅。
-- `zcode-tps.js` 同时包含「上方布局塌陷修复」与本次性能改动；不要对它做整文件回退。
-- 未升版本号：本地重新注入 TPS 即可生效；插件市场分发仍需发布时统一 bump。
+- 第一轮（asar ranged read / PostToolUse 移除 / 轮询降频 / 渲染层缓存）已随 `0.6.53` 发布。
+- 第二轮（ctypes 进程探测 / 同步预检缓存 / 指纹复用 / header 缓存）与「排队消息布局修复」
+  已随 `0.6.54` 发布。
+- `_sync_state.json` 只是预检结论缓存，删掉无害：下次会话启动会重新跑 4 个 `--check`。
+  若怀疑它导致误判，直接删除或置 `SYNC_CACHE_ENABLED = False`。
+- ctypes 进程探测失败会自动回退 PowerShell / `tasklist`；两者行为与旧版完全一致。
+- `zcode-tps.js` 同时包含「上方布局塌陷修复」「排队消息锚点」与性能改动；不要对它做整文件回退。
 - 快照逐会话路径依赖客户端现有索引；如果未来客户端移除
   `model_usage_session_turn_idx`，应重新评估 `tests/bench_perf.py` 的两种方案。

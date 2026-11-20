@@ -12,6 +12,7 @@
   1. asar 读取：整包 read_bytes（旧） vs header + seek/read（已采用）
   2. 快照聚合：逐会话索引查询（保留） vs GROUP BY + 窗口（实测更慢，已放弃）
   3. 计数：看护 tasklist 次数 / PostToolUse Python 启动次数（非墙钟）
+  4. 第二轮：Windows 进程探测（外部命令 vs ctypes）与同步预检指纹成本
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ import re
 import sqlite3
 import statistics
 import struct
+import subprocess
 import sys
 import tempfile
 import time
@@ -256,6 +258,40 @@ def bench_snapshot(sessions: int, rows: int, runs: int):
         con.close()
 
 
+def bench_probe(runs: int) -> list[tuple[str, str, str]]:
+    """Windows 进程探测与同步缓存指纹的成本（第二轮优化）。
+
+    PowerShell/tasklist 都是外部进程，单次成本主要是启动；ctypes 走系统调用。
+    非 Windows 只测同步指纹。
+    """
+    rows: list[tuple[str, str, str]] = []
+    if sys.platform == "win32":
+        def _powershell():
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-Process | Where-Object {$_.Path} | "
+                 "Select-Object -ExpandProperty Path -Unique"],
+                capture_output=True)
+
+        def _tasklist():
+            subprocess.run(["tasklist"], capture_output=True)
+
+        rows.append(("进程探测：PowerShell（每次 --check）",
+                     f"{median_time(_powershell, 1) * 1000:.0f}ms", "旧实现"))
+        rows.append(("进程探测：tasklist（看护每次轮询）",
+                     f"{median_time(_tasklist, 3) * 1000:.0f}ms", "旧实现"))
+        rows.append(("进程探测：ctypes EnumProcesses",
+                     f"{median_time(zp._win_process_paths, runs) * 1000:.1f}ms", "当前"))
+    try:
+        import sync as sy
+        rows.append(("同步预检指纹（asar stat + 5 文件 sha256）",
+                     f"{median_time(sy._cache_fingerprint, runs) * 1000:.1f}ms",
+                     "缓存命中路径"))
+    except Exception:
+        pass
+    return rows
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="zcode-toolkit 性能基准")
     ap.add_argument("--size-mb", type=int, default=64)
@@ -277,10 +313,17 @@ def main() -> int:
     for label, t, q, verdict in snap_rows:
         print(f"| {label} | {t} | {q} | {verdict} |")
 
+    print("\n### 第二轮：进程探测与同步预检缓存\n")
+    print("| 场景 | 耗时 | 说明 |")
+    print("|---|---|---|")
+    for label, t, verdict in bench_probe(args.runs):
+        print(f"| {label} | {t} | {verdict} |")
+
     print("\n### 计数（非墙钟）\n")
     print("| 项目 | 优化前 | 优化后 |")
     print("|---|---|---|")
-    print("| 看护 tasklist（24h） | 28,800 次 | ≈8,668 次（前 2 分钟 3s，之后 10s） |")
+    print("| 看护进程探测（24h） | 28,800 次 tasklist spawn | 0 次 spawn（ctypes，≈8,668 次/天 ×2.5ms） |")
+    print("| SessionStart 预检子进程 | 每次 4 个 --check | 0 个（客户端/源文件未变时命中缓存） |")
     print("| 快照 watcher spawn（生成期间） | ≤40 次/分钟 | ≤24 次/分钟（限频 1500→2500ms） |")
     print("| PostToolUse（300 次工具调用） | 300 次 Python 启动 | 0 次 |")
 

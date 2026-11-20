@@ -1043,14 +1043,17 @@ class TestProcessProbeDecodesSafely(unittest.TestCase):
 
         fake = _FakeProc(stdout_value)
         orig_run, orig_nt = zp.subprocess.run, zp.os.name
+        orig_paths = zp._win_process_paths
         zp.subprocess.run = lambda *a, **k: fake
         zp.os.name = "nt"
+        zp._win_process_paths = lambda: None      # 强制走 PowerShell 回退路径
         try:
             found: list = []
             zp._from_running_processes(found)
             return found
         finally:
             zp.subprocess.run, zp.os.name = orig_run, orig_nt
+            zp._win_process_paths = orig_paths
 
     def test_handles_str_stdout(self):
         """errors="replace" 时 subprocess 给的就是 str —— 必须能解析出安装目录。"""
@@ -1068,6 +1071,46 @@ class TestProcessProbeDecodesSafely(unittest.TestCase):
     def test_non_zcode_paths_are_ignored(self):
         found = self._run_probe("C:\\WINDOWS\\explorer.exe\n/usr/bin/python\n")
         self.assertEqual(found, [])
+
+
+@unittest.skipUnless(os.name == "nt", "仅 Windows：ctypes 进程枚举")
+class TestWinProcessPaths(unittest.TestCase):
+    """Windows 进程探测必须走 ctypes，不再每次 spawn PowerShell/tasklist。
+
+    为什么值得钉死：`--check` 每次探测安装位置都会调进程枚举；`sync.py --detach`
+    在**会话启动路径上**同步跑一次指纹探测；看护每 3–10s 还要判定一次 ZCode 是否
+    退出。PowerShell 实测 ≈986ms/次、tasklist ≈320ms/次，都是纯启动开销。
+    """
+
+    def test_lists_current_python_process(self):
+        import sys
+        import zcode_patcher as zp
+        paths = zp._win_process_paths()
+        self.assertIsNotNone(paths, "ctypes 枚举不可用（会退回 ≈1s/次的 PowerShell）")
+        want = os.path.normcase(os.path.abspath(sys.executable))
+        got = {os.path.normcase(os.path.abspath(p)) for p in paths}
+        self.assertIn(want, got, "枚举结果里没有当前 Python 进程")
+
+    def test_zcode_running_uses_ctypes_without_spawning(self):
+        import zcode_patcher as zp
+        orig_paths, orig_run = zp._win_process_paths, zp.subprocess.run
+        try:
+            zp._win_process_paths = lambda: [r"C:\Program Files\ZCode\ZCode.exe"]
+            zp.subprocess.run = lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("ctypes 可用时不应 spawn tasklist/PowerShell"))
+            self.assertTrue(zp.zcode_running())
+            zp._win_process_paths = lambda: [r"C:\Apps\notepad.exe"]
+            self.assertFalse(zp.zcode_running())
+        finally:
+            zp._win_process_paths, zp.subprocess.run = orig_paths, orig_run
+
+    def test_powershell_fallback_retained(self):
+        import zcode_patcher as zp
+        src = Path(zp.__file__).read_text(encoding="utf-8")
+        self.assertIn("def _win_process_paths_powershell", src,
+                      "ctypes 路不可用时必须保留 PowerShell 回退")
+        self.assertIn("if lines is None:", src,
+                      "_from_running_processes 没有回退到 PowerShell 分支")
 
 
 @unittest.skipIf(os.name == "nt", "POSIX 分支（Windows 走 tasklist，不经过这段）")
@@ -2354,6 +2397,10 @@ class TestTpsLayoutSmoke(unittest.TestCase):
         self.assertIn("host.previousElementSibling !== card", src, "下方模式缺相邻性守卫")
         self.assertIn("section[data-turn-id]", src, "缺消息轮次守卫")
         self.assertIn('flexShrink: "0"', src, "host 未禁止 flex 压缩")
+        self.assertIn('const QUEUE_TESTID = "v4-queue"', src,
+                      "缺排队消息容器锚点（v4-queue 的 -mb-7 依赖与卡片贴合）")
+        self.assertIn("function isQueueBlock(el)", src, "缺 isQueueBlock")
+        self.assertIn("isQueueBlock(prev)", src, "aboveAnchor 未优先识别排队容器")
 
     def test_layout_smoke_without_argument_fails_helpfully(self):
         if not self.node:
@@ -2608,11 +2655,14 @@ class TestSyncHeartbeat(unittest.TestCase):
         sync.MARKER = d / "_autoinject.done"  # 别把标记写进真实安装目录
         tps_snapshot.resolve_v2_root = lambda: d
         tps_snapshot.main = lambda *a, **k: None
+        self._orig_cache = sync.SYNC_CACHE_ENABLED
+        sync.SYNC_CACHE_ENABLED = False   # 本类跑真 main()/run_sync，不能写真实缓存文件
 
     def tearDown(self):
         (self.sync.CONFIG, self.sync.STAMP, self.sync.LOG,
          self.sync.MARKER) = self._orig[:4]
         (self.tps.resolve_v2_root, self.tps.main) = self._orig[4:6]
+        self.sync.SYNC_CACHE_ENABLED = self._orig_cache
         self._tmp.cleanup()
 
     def test_beat_writes_timestamp_and_message(self):
@@ -2672,12 +2722,15 @@ class TestSyncModes(unittest.TestCase):
         # run_sync 收尾会写真 v2 状态/指针文件 + 刷新真 TPS 快照 —— 全部指到临时目录
         tps_snapshot.resolve_v2_root = lambda: d
         tps_snapshot.main = lambda *a, **k: None
+        self._orig_cache = sync.SYNC_CACHE_ENABLED
+        sync.SYNC_CACHE_ENABLED = False   # check_state 被桩替换时不得复用真实结论
 
     def tearDown(self):
         (self.sync.CONFIG, self.sync.STAMP, self.sync.LOG,
          self.sync.MARKER, self.sync.CLIENT_FINGERPRINT) = self._orig[:5]
         (self.tps.resolve_v2_root, self.tps.main) = self._orig[5:7]
         sys.argv[:] = self._orig[7]
+        self.sync.SYNC_CACHE_ENABLED = self._orig_cache
         self._tmp.cleanup()
 
     def _run(self, *args):
@@ -2757,6 +2810,8 @@ class TestSyncParallelChecks(unittest.TestCase):
         sync.CLIENT_FINGERPRINT = d / "_client_fingerprint.json"
         self.tps.resolve_v2_root = lambda: Path(d)
         self.tps.main = lambda *a, **k: None
+        self._orig_cache = sync.SYNC_CACHE_ENABLED
+        sync.SYNC_CACHE_ENABLED = False   # 并行检查测试自己桩 check_state，不能命中缓存
         sync.CONFIG.write_text(json.dumps(
             {"plugins": {"options": {"zcode-tools@zcode-tools": {
                 "tps_footer": True, "enhance_prompt": True,
@@ -2768,6 +2823,7 @@ class TestSyncParallelChecks(unittest.TestCase):
          self.sync.MARKER, self.sync.CLIENT_FINGERPRINT) = self._orig[:5]
         self.tps.resolve_v2_root, self.tps.main = self._orig[5:7]
         sys.argv[:] = self._orig[7]
+        self.sync.SYNC_CACHE_ENABLED = self._orig_cache
         self._tmp.cleanup()
 
     def test_checks_run_concurrently(self):
@@ -2796,6 +2852,156 @@ class TestSyncParallelChecks(unittest.TestCase):
         self.assertEqual(len(idents), 4, "四个补丁的 --check 都要跑")
         self.assertGreaterEqual(len(set(idents)), 2, "必须落在多个线程上（并行）")
         self.assertFalse(barrier.broken)
+
+
+class TestSyncStateCache(unittest.TestCase):
+    """SessionStart 预检缓存：客户端/注入源文件没变时不再跑 4 个 `--check`。
+
+    单次 `--check` ≈0.3s、峰值 ≈44MB；4 个并发是会话启动路径上最大的一笔开销。
+    缓存必须严格失效：asar 指纹、注入源文件、判定逻辑版本任一变化都要重新检查，
+    否则会重现 0.6.1 的静默失效（插件更新了，结论却还是「已一致」）。
+    """
+
+    def setUp(self):
+        import sync
+        import tps_snapshot
+        self.sync = sync
+        self.tps = tps_snapshot
+        self._tmp = tempfile.TemporaryDirectory(prefix="zpatch-cache-",
+                                                ignore_cleanup_errors=True)
+        d = Path(self._tmp.name)
+        self._orig = (sync.SYNC_STATE, sync.SYNC_CACHE_ENABLED, sync.CONFIG,
+                      sync.STAMP, sync.LOG, sync.MARKER,
+                      sync.CLIENT_FINGERPRINT,
+                      tps_snapshot.resolve_v2_root, tps_snapshot.main,
+                      sync._cache_fingerprint)
+        sync.SYNC_STATE = d / "_sync_state.json"
+        sync.SYNC_CACHE_ENABLED = True
+        sync.CONFIG = d / "config.json"
+        sync.STAMP = d / "_sync.last"
+        sync.LOG = d / "_sync.log"
+        sync.MARKER = d / "_autoinject.done"
+        sync.CLIENT_FINGERPRINT = d / "_client_fingerprint.json"
+        tps_snapshot.resolve_v2_root = lambda: d
+        tps_snapshot.main = lambda *a, **k: None
+        sync.CONFIG.write_text(json.dumps(
+            {"plugins": {"options": {"zcode-tools@zcode-tools": {
+                "tps_footer": True, "enhance_prompt": True,
+                "model_puller": True, "inject_status": True}}}}),
+            encoding="utf-8")
+        self._fp = {"asars": [["D:/x/app.asar", 10, 20]],
+                    "sources": {"zcode_patcher.py": "sha1"},
+                    "logic": sync.SYNC_CACHE_VERSION}
+        sync._cache_fingerprint = lambda: dict(self._fp)
+        self.calls = []
+
+    def tearDown(self):
+        (self.sync.SYNC_STATE, self.sync.SYNC_CACHE_ENABLED, self.sync.CONFIG,
+         self.sync.STAMP, self.sync.LOG, self.sync.MARKER,
+         self.sync.CLIENT_FINGERPRINT, self.tps.resolve_v2_root,
+         self.tps.main, self.sync._cache_fingerprint) = self._orig
+        self._tmp.cleanup()
+
+    def _run(self, table=None):
+        table = table or {}
+
+        def fake_check(args):
+            self.calls.append(tuple(args))
+            return table.get(tuple(args), "on")
+
+        orig = (self.sync.check_state, self.sync.run_patcher,
+                self.sync.start_watchdog)
+        self.sync.check_state = fake_check
+        self.sync.run_patcher = lambda args, revert: "ok"
+        self.sync.start_watchdog = lambda wanted: None
+        try:
+            return self.sync.run_sync(echo=False)
+        finally:
+            (self.sync.check_state, self.sync.run_patcher,
+             self.sync.start_watchdog) = orig
+
+    def test_second_run_reuses_states_without_checks(self):
+        self._run()
+        self.assertEqual(len(self.calls), 4)
+        self.assertTrue(self.sync.SYNC_STATE.is_file())
+        self._run()
+        self.assertEqual(len(self.calls), 4, "第二次会话启动不应再跑 --check")
+
+    def test_asar_or_source_change_invalidates(self):
+        self._run()
+        self._fp = {"asars": [["D:/x/app.asar", 11, 21]],     # 客户端重打包/升级
+                    "sources": {"zcode_patcher.py": "sha1"},
+                    "logic": self.sync.SYNC_CACHE_VERSION}
+        self._run()
+        self.assertEqual(len(self.calls), 8, "asar 指纹变化后必须重新检查")
+        self._fp = {"asars": [["D:/x/app.asar", 11, 21]],
+                    "sources": {"zcode_patcher.py": "sha2"},   # 插件更新换注入脚本
+                    "logic": self.sync.SYNC_CACHE_VERSION}
+        self._run()
+        self.assertEqual(len(self.calls), 12, "注入源文件变化后必须重新检查")
+
+    def test_unknown_states_are_not_cached(self):
+        self._run({("--tps-footer",): "unknown"})
+        self.assertFalse(self.sync.SYNC_STATE.is_file(),
+                         "unknown 是瞬时失败，不能被缓存成结论")
+        self._run()
+        self.assertEqual(len(self.calls), 8, "上一次 unknown 不应阻止重新检查")
+
+    def test_deferred_write_does_not_cache(self):
+        # 状态 off + 开关要求开 → repack 级补丁转交看护（deferred）→ asar 稍后会变
+        self._run({("--tps-footer",): "off", ("--model-puller",): "off",
+                   ("--enhance-prompt",): "off", ("--inject-status",): "off"})
+        self.assertFalse(self.sync.SYNC_STATE.is_file(),
+                         "有待写入项时 asar 会变，不能缓存当前结论")
+
+
+class TestClientFingerprintReuse(unittest.TestCase):
+    """asar 未变化时，指纹里的版本号必须复用，不再解析 8MB header。
+
+    `get_client_fingerprint()` 跑在 `--detach` 的**会话启动内联路径**上；
+    `asar_version()` 本机实测 ≈60ms（读 header + json.loads）。日常启动
+    asar 根本不会变，这次解析纯属浪费。
+    """
+
+    def setUp(self):
+        import sync
+        import zcode_patcher as zp
+        self.sync, self.zp = sync, zp
+        self._tmp = tempfile.TemporaryDirectory(prefix="zpatch-fp-",
+                                                ignore_cleanup_errors=True)
+        d = Path(self._tmp.name)
+        self.asar = d / "app.asar"
+        self.asar.write_bytes(b"x" * 64)
+        self._orig = (sync.CLIENT_FINGERPRINT, zp._resolve_asars, zp.asar_version)
+        sync.CLIENT_FINGERPRINT = d / "_client_fingerprint.json"
+        zp._resolve_asars = lambda target: [self.asar]
+        self.calls = []
+        zp.asar_version = lambda a: (self.calls.append(a), "9.9.9")[1]
+
+    def tearDown(self):
+        (self.sync.CLIENT_FINGERPRINT, self.zp._resolve_asars,
+         self.zp.asar_version) = self._orig
+        self._tmp.cleanup()
+
+    def test_reuses_version_when_asar_unchanged(self):
+        fp1 = self.sync.get_client_fingerprint()
+        self.assertEqual(fp1["version"], "9.9.9")
+        self.assertEqual(len(self.calls), 1)
+        self.sync.CLIENT_FINGERPRINT.write_text(json.dumps(fp1), encoding="utf-8")
+        fp2 = self.sync.get_client_fingerprint()
+        self.assertEqual(fp2["version"], "9.9.9")
+        self.assertEqual(len(self.calls), 1, "asar 未变化时不应再解析 header")
+
+    def test_rereads_after_asar_change(self):
+        fp1 = self.sync.get_client_fingerprint()
+        self.sync.CLIENT_FINGERPRINT.write_text(json.dumps(fp1), encoding="utf-8")
+        self.calls.clear()
+        self.asar.write_bytes(b"y" * 128)
+        os.utime(self.asar, (time.time() + 5, time.time() + 5))
+        fp2 = self.sync.get_client_fingerprint()
+        self.assertEqual(len(self.calls), 1, "asar 变化后必须重新读版本")
+        self.assertEqual(fp2["version"], "9.9.9")
+        self.assertEqual(fp2["size"], 128)
 
 
 class TestWatchdogScheduledTask(unittest.TestCase):
@@ -2916,11 +3122,14 @@ class TestSyncStaleIsReinjected(unittest.TestCase):
         # stale 判定走 run_sync 时会写真 v2 状态文件 + 刷新真 TPS 快照 —— 全隔离
         tps_snapshot.resolve_v2_root = lambda: d
         tps_snapshot.main = lambda *a, **k: None
+        self._orig_cache = sync.SYNC_CACHE_ENABLED
+        sync.SYNC_CACHE_ENABLED = False   # 同一测试内多次换桩状态，不能复用上次结论
 
     def tearDown(self):
         (self.sync.CONFIG, self.sync.STAMP, self.sync.LOG,
          self.sync.MARKER) = self._orig[:4]
         (self.tps.resolve_v2_root, self.tps.main) = self._orig[4:6]
+        self.sync.SYNC_CACHE_ENABLED = self._orig_cache
         self._tmp.cleanup()
 
     # ---------- check_state 必须把「内容旧」和「已最新」分开 ----------
@@ -3291,9 +3500,12 @@ class TestAutoInject(unittest.TestCase):
         self._tps_orig = (self.tps.resolve_v2_root, self.tps.main)
         self.tps.resolve_v2_root = lambda: self._d
         self.tps.main = lambda *a, **k: None
+        self._orig_cache = sync.SYNC_CACHE_ENABLED
+        sync.SYNC_CACHE_ENABLED = False   # check_state 被桩替换，不能写真实缓存文件
 
     def tearDown(self):
         (self.tps.resolve_v2_root, self.tps.main) = self._tps_orig
+        self.sync.SYNC_CACHE_ENABLED = self._orig_cache
         self._tmp.cleanup()
 
     def _resolve(self, opts, source, defaults):

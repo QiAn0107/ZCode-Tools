@@ -181,7 +181,14 @@ check(/const room = bBottom - h\.bottom - GAP_TARGET/.test(src),
 check(/now - host\._fitAt > 1000/.test(src),
       "缺重量节流，布局/窗口变化后补偿不会刷新");
 check(!/parentRowGap/.test(src), "旧的 parentRowGap 猜测式补偿应已移除");
-check(/scriptVersion = "3\.31-above-guard"/.test(src), "脚本版本号未同步到 3.31-above-guard");
+check(/scriptVersion = "3\.32-queue-anchor"/.test(src), "脚本版本号未同步到 3.32-queue-anchor");
+// 排队消息容器（v4-queue）是输入堆叠的顶边：它的 -mb-7 pb-7 依赖与卡片贴合，
+// 状态条必须挂到容器之上，否则会露出容器的平底边、夹在两层之间。
+check(/const QUEUE_TESTID = "v4-queue"/.test(src), "缺排队消息容器锚点，状态条会被插进 queue 与卡片之间");
+check(/function isQueueBlock\(el\)/.test(src), "缺 isQueueBlock，无法识别 v4-queue");
+check(/isQueueBlock\(prev\)/.test(src), "aboveAnchor 未优先识别 v4-queue");
+check(/anchor\.insertAdjacentElement\("beforebegin", host\)/.test(src),
+      "上方模式应按锚点（queue 或卡片）插入");
 // 0.6.52 上方挂载回归：只允许挂真实 composer dock；间距补偿必须有硬上限，
 // 且 host 与卡片必须相邻。问题卡/弹窗插在中间或间距被放大时一律清零 margin。
 check(/const MAX_FIT_GAP = \d+/.test(src), "缺 MAX_FIT_GAP 硬上限，异常大间距会写出大负 margin");
@@ -279,8 +286,8 @@ check(!/id: "toolbar"|id: "session-top"/.test(src), "toolbar/session-top 旧模�
 check(/POSITIONS\.some\(\(p\) => p\.id === v\) \? v : "composer-above"/.test(src) &&
       /catch \(err\) \{ return "composer-above"; \}/.test(src),
       "getPos 默认值/异常兜底必须改为 composer-above（输入框上方）");
-check(/card\.insertAdjacentElement\("beforebegin", host\)/.test(src),
-      "输入框上方必须用 beforebegin 插到 composer 卡片之前");
+check(/anchor\.insertAdjacentElement\("beforebegin", host\)/.test(src),
+      "输入框上方必须用 beforebegin 插到锚点（queue 容器或 composer 卡片）之前");
 check(/function fitGapAbove\(host, card\)/.test(src) && /const fit = mode === "composer-above" \? fitGapAbove : fitGap/.test(src),
       "上方模式必须用镜像间距补偿 fitGapAbove（下方仍用 fitGap）");
 

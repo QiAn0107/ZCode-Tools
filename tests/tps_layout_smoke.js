@@ -252,8 +252,17 @@ function buildTree(doc, opts) {
     questionCard.__hidden = true;
     questionInput.__hidden = true;
   }
+  if (o.withQueue) {
+    // 客户端排队消息容器：与 composer 卡片同父，-mb-7 pb-7 把底边藏进卡片后面
+    const queue = mk(doc, "div", { "data-testid": "v4-queue", "data-queue-count": "1",
+                                   "class": "-mb-7 pb-7 rounded-t-2xl" });
+    anchor.insertBefore(queue, realCard);          // queue, realCard
+    queue.__rect = rect(700, 780);                 // 底边压进卡片 28px
+    return { frame, timeline, column, messageLayer, turn, questionCard, questionInput,
+             questionSend, dock, dockContent, anchor, queue, realCard, realInput, trailing, realSend };
+  }
   return { frame, timeline, column, messageLayer, turn, questionCard, questionInput,
-           questionSend, dock, dockContent, anchor, realCard, realInput, trailing, realSend };
+           questionSend, dock, dockContent, anchor, queue: null, realCard, realInput, trailing, realSend };
 }
 
 function makeHost(doc, top, bottom) {
@@ -435,9 +444,57 @@ const MAX = 32;
   check(!t.questionCard.contains(host), "旧布局：仍不得进入问题卡");
 }
 
+// ---------------------------------------------------------------- 场景 10：有排队消息时挂在 v4-queue 之上
+// queue 容器带 -mb-7 pb-7，底边故意藏进 composer 卡片后面；状态条一旦插进
+// 两者之间，queue 的平底边露出来、状态条悬空，视觉上是「断成两截」。
+{
+  const doc = makeDocument();
+  const t = buildTree(doc, { withQueue: true });
+  const { api } = boot(doc);
+  const host = makeHost(doc, 660, 680);    // queue.top=700 → gap=20
+  check(api.attach(host, "composer-above") === true, "排队消息：attach 应成功");
+  check(host.parentElement === t.anchor, "排队消息：host 应留在 composer dock 内");
+  check(host.nextElementSibling === t.queue,
+        "排队消息：host 必须紧邻 queue 容器之前，不能夹在 queue 与卡片之间");
+  check(t.queue.nextElementSibling === t.realCard,
+        "排队消息：queue 与 composer 卡片必须保持贴合（-mb-7 设计）");
+  const mb = num(host.style.marginBottom);
+  check(mb >= -MAX && mb <= MAX, "排队消息：marginBottom 必须在 [-32,32]，实际 " + host.style.marginBottom);
+  check(mb < 0, "排队消息：20px 间距应被补偿到接近 2px，实际 " + host.style.marginBottom);
+}
+
+// ---------------------------------------------------------------- 场景 11：旧坏位置（queue, host, card）自愈
+{
+  const doc = makeDocument();
+  const t = buildTree(doc, { withQueue: true });
+  const { api } = boot(doc);
+  const host = makeHost(doc, 780, 800);
+  t.anchor.insertBefore(host, t.realCard);   // 模拟 0.6.53：状态条被插在 queue 与卡片之间
+  check(host.previousElementSibling === t.queue && host.nextElementSibling === t.realCard,
+        "旧位置自愈：前置条件不成立");
+  check(api.attach(host, "composer-above") === true, "旧位置自愈：attach 应成功");
+  check(host.nextElementSibling === t.queue,
+        "旧位置自愈：host 必须被挪回 queue 之前");
+  check(t.queue.nextElementSibling === t.realCard,
+        "旧位置自愈：挪走后 queue 应与卡片重新贴合");
+}
+
+// ---------------------------------------------------------------- 场景 12：排队消息清空后贴回卡片
+{
+  const doc = makeDocument();
+  const t = buildTree(doc, { withQueue: true });
+  const { api } = boot(doc);
+  const host = makeHost(doc, 660, 680);
+  check(api.attach(host, "composer-above") === true, "排队清空：初始 attach 应成功");
+  t.queue.remove();
+  check(api.attach(host, "composer-above") === true, "排队清空：清空后 attach 应成功");
+  check(host.nextElementSibling === t.realCard,
+        "排队清空：host 应贴回 composer 卡片（不再等 queue）");
+}
+
 if (bad.length) {
   console.error("tps_layout_smoke: " + bad.length + " 项失败");
   for (const m of bad) console.error("  ✗ " + m);
   process.exit(1);
 }
-console.log("tps layout smoke OK (9 scenarios)");
+console.log("tps layout smoke OK (12 scenarios)");

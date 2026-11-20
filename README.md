@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.53-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.54-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -150,6 +150,13 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.54（排队消息布局修复 + 进程探测/同步预检性能）
+- **修复排队消息时状态条夹在两层之间**：客户端排队容器 `data-testid="v4-queue"` 自带 `-mb-7 pb-7`，底部 28px 故意藏进 composer 卡片后面（只有 `rounded-t-2xl`）。0.6.53 把状态条插在卡片正前方后会落进 queue 与卡片之间，露出 queue 的平底边、状态条悬空夹在两层中间。新增 `aboveAnchor()`：queue 紧邻卡片时锚点上移到 queue 容器，queue↔卡片的贴合关系保持不变；旧坏位置（queue, host, card）在下次巡检自动纠正；锚点切换强制重算间距，不等 1s 节流。layout smoke 扩到 12 场景（排队挂载/旧位置自愈/清空回退），`scriptVersion` 3.31-above-guard→3.32-queue-anchor；
+- **性能：Windows 进程探测改 ctypes**：`_from_running_processes()` 原来每个 `--check` 起一次 PowerShell（实测 986ms），`zcode_running()` 每次看护轮询起一次 `tasklist`（320ms）。改用 `EnumProcesses` + `QueryFullProcessImageNameW`（2.4ms），不可用时自动回退原命令。单个 `--check` 1.31s→0.30s，`--check --all` 1.71s→0.49s；看护 24h 进程探测 ≈46 分钟→≈22 秒 CPU；
+- **性能：SessionStart 预检结论缓存**：asar 指纹（路径/size/mtime_ns）+ 5 个注入源文件 sha256 + 逻辑版本都没变时，`run_sync` 直接复用上次 `check_state` 结论、跳过全部 4 个 `--check`（≈1.2s CPU / 4×44MB 峰值 → ≈25ms 指纹比对）。写入/延期/`unknown` 不缓存；客户端升级、插件更新、看护写入都会让指纹失效，不会重现「插件更新了却复用已一致」的静默失效；
+- **性能：版本号与 header 复用**：会话启动内联路径的 `asar_version()`（≈60ms）在 asar 未变时直接复用指纹文件里的版本；`_read_asar_header()` 增加按 `(path, size, mtime_ns)` 校验的进程内缓存（`--all` 由 5 次 header 解析降为 1 次，重打包路径显式 `use_cache=False` 绕过）；
+- **测试**：387 项通过（6 skipped）；layout smoke 12 场景；新增 `TestSyncStateCache`（命中/asar 变化/源文件变化/unknown 不缓存/延期不缓存）、`TestWinProcessPaths`、`TestClientFingerprintReuse`；`bench_perf.py` 增加进程探测与同步指纹基准。
 
 #### 0.6.53（TPS 上方布局塌陷修复 + 运行时性能优化）
 - **修复 0.6.52 上方模式回归**：出现提问卡/弹窗时会话记录整片空白、面板位置错乱。根因① `fitGapAbove` 的 cap 用实测间距自我封顶——问题卡把卡片推远后会写出几百 px 负 `marginBottom`，把 sticky composer dock 拉塌；② 全局 `textarea` / `form textarea` 兜底可能把问题卡/弹窗输入框当成 composer，状态条被插进消息流。修法：新增 `isRealComposerCard` 逐候选校验（主会话 frame / composer dock / 非 dialog / 非 `section[data-turn-id]` / 带 composer 控件）；`MAX_FIT_GAP=32` 硬上限 + 相邻性守卫 + margin clamp；真实 composer 不可用时状态条隐藏，关闭后 500ms 内自愈；host 增加 `flexShrink:0` / `minHeight:20px`。新增 `tests/tps_layout_smoke.js`（9 场景：正常上方/问题卡共存/隐藏 composer/500px 大间距/中间插面板/下方模式/关闭自愈/弹窗/无 frame 旧布局）；

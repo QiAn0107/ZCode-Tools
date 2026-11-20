@@ -265,6 +265,27 @@
     } catch (err) { return false; }
   }
 
+  // 排队消息容器(client 的 data-testid="v4-queue")：渲染在 composer 卡片正上方，
+  // 自带 -mb-7 pb-7——底部 28px 故意藏到卡片后面，视觉上与输入框是一整块。
+  // ★ 0.6.53 只能挂在卡片前，于是状态条落进 queue 与卡片之间：queue 的平底边
+  //   （只 rounded-t-2xl）被露出来，状态条被挤在两层之间，很难看。
+  //   上方模式的真正锚点应该是这层容器的顶边：queue → 卡片保持贴合，状态条在整个
+  //   输入堆叠之上。below 模式不受影响。
+  const QUEUE_TESTID = "v4-queue";
+  function isQueueBlock(el) {
+    return !!(el && el.getAttribute && el.getAttribute("data-testid") === QUEUE_TESTID);
+  }
+  function aboveAnchor(card, host) {
+    if (!card) return card;
+    const prev = card.previousElementSibling;
+    if (isQueueBlock(prev)) return prev;
+    // 旧位置（queue, host, card）：把 host 纠正到 queue 之前，而不是继续贴着卡片
+    if (host && prev === host && isQueueBlock(host.previousElementSibling)) {
+      return host.previousElementSibling;
+    }
+    return card;
+  }
+
   let posMenu = null;
   function closePosMenu() {
     if (posMenu) {
@@ -727,7 +748,7 @@
   let diag = null;
   try {
     diag = window.__ztpsDiag = window.__ztpsDiag || {};
-    diag.scriptVersion = "3.31-above-guard";
+    diag.scriptVersion = "3.32-queue-anchor";
     diag.loadedAt = new Date().toISOString();
   } catch (err) { /* ignore */ }
 
@@ -828,8 +849,11 @@
   function fitGapAbove(host, card) {
     if (!host || !card || !host.isConnected || !card.isConnected) return;
     try {
-      // 只处理紧邻卡片；问题卡/弹窗插在中间时实测间距没有意义
-      if (!isRealComposerCard(card) || host.nextElementSibling !== card) {
+      // 只处理紧邻锚点；问题卡/弹窗插在中间时实测间距没有意义。
+      // 锚点允许两种：真实 composer 卡片，或它上方紧邻的排队消息容器
+      // （v4-queue 与卡片是一整块，状态条挂在容器之上，间距同样收到 GAP_TARGET）。
+      if ((!isQueueBlock(card) && !isRealComposerCard(card)) ||
+          host.nextElementSibling !== card) {
         resetFit(host);
         if (diag) diag.fitAbove = { gap: null, mb: 0, skipped: "not-adjacent" };
         return;
@@ -898,18 +922,31 @@
         if (!host._fitAt || now - host._fitAt > 1000) { fitGap(host, host._target); host._fitAt = now; }
         return true;
       }
-      if (mode === "composer-above" && host.nextElementSibling === host._target) {
-        if (!host._fitAt || now - host._fitAt > 1000) { fitGapAbove(host, host._target); host._fitAt = now; }
-        return true;
+      if (mode === "composer-above") {
+        // 有排队消息时锚点是 v4-queue 容器（整块输入堆叠的顶边），否则是卡片本身
+        const anchor = aboveAnchor(host._target, host);
+        if (host.nextElementSibling === anchor) {
+          // 锚点变化（排队消息出现/清空）时强制重量一次，别等 1s 节流，
+          // 否则旧锚点的负 margin 会让胶囊贴错位置最多 1s。
+          const anchorChanged = host._fitAnchor !== anchor;
+          if (anchorChanged || !host._fitAt || now - host._fitAt > 1000) {
+            fitGapAbove(host, anchor);
+            host._fitAt = now;
+            host._fitAnchor = anchor;
+          }
+          return true;
+        }
       }
     }
     // 输入框上方/下方共用 composer 卡片锚点,只是插入方向相反（beforebegin / afterend）
     const card = findComposerCard();
     if (!card || !card.parentElement || isInsideSidePane(card)
         || !isRealComposerCard(card)) return false;
+    // 上方模式：队列容器紧邻卡片时挂到它上面，保住 queue↔卡片 的 -mb-7 贴合
+    const anchor = mode === "composer-above" ? aboveAnchor(card, host) : card;
     const sibling = mode === "composer-above" ? host.nextElementSibling : host.previousElementSibling;
-    if (changed || host.parentElement !== card.parentElement || sibling !== card) {
-      if (mode === "composer-above") card.insertAdjacentElement("beforebegin", host);
+    if (changed || host.parentElement !== card.parentElement || sibling !== anchor) {
+      if (mode === "composer-above") anchor.insertAdjacentElement("beforebegin", host);
       else card.insertAdjacentElement("afterend", host);
       host.setAttribute("data-ztps-mode", mode);
       host.style.cssText = "";
@@ -924,7 +961,13 @@
       });
       // 插入完成后量一次实际空白并抵消（rAF 保证拿到最终布局）
       const fit = mode === "composer-above" ? fitGapAbove : fitGap;
-      try { requestAnimationFrame(() => { fit(host, card); host._fitAt = Date.now(); }); } catch (err) { /* 静默 */ }
+      try {
+        requestAnimationFrame(() => {
+          fit(host, anchor);
+          host._fitAt = Date.now();
+          if (mode === "composer-above") host._fitAnchor = anchor;
+        });
+      } catch (err) { /* 静默 */ }
     }
     host._target = card;
     const pill = host.firstChild;
@@ -1319,7 +1362,7 @@
   try {
     window.__ztpsTest = {
       findComposerInput, findComposerCard, attach, fitGap, fitGapAbove,
-      isRealComposerCard, cardOf, resetFit,
+      isRealComposerCard, cardOf, resetFit, isQueueBlock, aboveAnchor,
     };
   } catch (err) { /* 静默 */ }
 

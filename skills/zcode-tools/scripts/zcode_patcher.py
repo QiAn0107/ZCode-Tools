@@ -240,10 +240,82 @@ def _norm(s: str) -> str:
     return s.lower().replace(" ", "").replace("-", "")
 
 
-def _from_running_processes(found: list[Path]) -> None:
-    """1) 正在运行的 ZCode 进程路径（最准：用户实际在用哪个）"""
+def _win_process_paths() -> list[str] | None:
+    """Windows：枚举所有进程的 exe 路径（ctypes 系统调用，不 spawn 子进程）。
+
+    为什么不用 PowerShell：`Get-Process | Select Path` 每次都要起一个 powershell
+    进程——本机实测 **≈986ms / 每次**，而每个 `--check` 探测安装位置都会调它一次；
+    SessionStart 的 sync 又并发跑 4 个 `--check`，一次会话启动就等于起 4 个
+    PowerShell（≈4s CPU、数百 MB 瞬时内存），而且 `sync.py --detach` 里的
+    `detect_upgrade_or_first_run()` 还在**会话启动路径上同步**等它 ~1s。
+    `EnumProcesses` + `QueryFullProcessImageNameW` 拿到的是同一份信息，实测 <10ms。
+
+    返回 None 表示这条路不可用（非 Windows / 老系统 / 权限异常 / 接口缺失），
+    调用方回退原来的 PowerShell 探测，行为不变。
+    """
     if os.name != "nt":
-        return
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    except Exception:
+        return None
+    try:
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        EnumProcesses = psapi.EnumProcesses
+        EnumProcesses.argtypes = [ctypes.POINTER(wintypes.DWORD), wintypes.DWORD,
+                                  ctypes.POINTER(wintypes.DWORD)]
+        EnumProcesses.restype = wintypes.BOOL
+        OpenProcess = kernel32.OpenProcess
+        OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        OpenProcess.restype = wintypes.HANDLE
+        QueryFullProcessImageNameW = kernel32.QueryFullProcessImageNameW
+        QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD)]
+        QueryFullProcessImageNameW.restype = wintypes.BOOL
+        CloseHandle = kernel32.CloseHandle
+        CloseHandle.argtypes = [wintypes.HANDLE]
+        CloseHandle.restype = wintypes.BOOL
+
+        cap = 1024
+        while True:
+            arr = (wintypes.DWORD * cap)()
+            used = wintypes.DWORD()
+            if not EnumProcesses(arr, ctypes.sizeof(arr), ctypes.byref(used)):
+                return None
+            n = used.value // ctypes.sizeof(wintypes.DWORD)
+            if n < cap:
+                break
+            cap *= 2                      # 进程数超过缓冲区：扩容重枚举
+            if cap > 65536:
+                return None
+        buf = ctypes.create_unicode_buffer(32768)
+        paths: list[str] = []
+        for i in range(n):
+            pid = int(arr[i])
+            if pid <= 0:
+                continue
+            h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not h:                      # 系统/受保护进程：没权限就跳过
+                continue
+            try:
+                size = wintypes.DWORD(len(buf))
+                if QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                    paths.append(buf.value)
+            finally:
+                CloseHandle(h)
+        return paths
+    except Exception:
+        return None
+
+
+def _win_process_paths_powershell() -> list[str] | None:
+    """PowerShell 探测（ctypes 路不可用时的回退），返回逐行路径；失败返回 None。"""
+    if os.name != "nt":
+        return None
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
@@ -253,13 +325,25 @@ def _from_running_processes(found: list[Path]) -> None:
             **no_window_kwargs(),
         ).stdout or ""
     except Exception:
-        return
+        return None
     # 注意：传了 errors="replace" 时 subprocess 会直接解码成 **str**（不是 bytes），
     # 所以这里不能再 `.decode()` —— 那会抛 AttributeError 并被上面吞掉，
     # 表现为「探测器命中 0 个」这种极难定位的静默失败。两种类型都接住。
     if isinstance(out, bytes):
         out = out.decode(errors="replace")
-    for line in out.splitlines():
+    return out.splitlines()
+
+
+def _from_running_processes(found: list[Path]) -> None:
+    """1) 正在运行的 ZCode 进程路径（最准：用户实际在用哪个）"""
+    if os.name != "nt":
+        return
+    lines = _win_process_paths()
+    if lines is None:
+        lines = _win_process_paths_powershell()
+    if not lines:
+        return
+    for line in lines:
         line = line.strip()
         # ZCode.exe / ZCode Skin Manager 等都指向安装根目录。
         # 存 PureWindowsPath 而非 Path：单测把 os.name 伪造成 "nt"（zp.os 即全局 os
@@ -1558,9 +1642,31 @@ return{success:!0,providerId:String(cfg.providerId||""),modelId:String(cfg.model
 '''
 
 
-def _read_asar_header(asar: Path):
+#: asar header 解析缓存：同一次运行里 `--all` 会把同一个 header 解析 5 次
+#: （asar_version + 4 个补丁各自的检查），每次 json.loads 8.3MB ≈22ms。
+#: 键 = 路径，值 = ((size, mtime_ns), (header, data_start))。读只读路径共享同一份；
+#: **重打包必须绕过缓存**（_repack_asar_locked 会原地改写 header 树），见 use_cache=False。
+_HEADER_CACHE: dict[str, tuple[tuple[int, int], tuple[dict, int]]] = {}
+
+
+def _read_asar_header(asar: Path, *, use_cache: bool = True):
     """只读 asar 头（不解码数据区），返回 (header 树, 数据区起始偏移)。
-    重打包时不该把整包读进内存，所以单独提供这个轻量版本。"""
+    重打包时不该把整包读进内存，所以单独提供这个轻量版本。
+
+    use_cache=False 仅供重打包使用：那条路径会原地改写返回的 header 树。
+    """
+    key = str(asar)
+    sig = None
+    if use_cache:
+        try:
+            st = os.stat(asar)
+            sig = (st.st_size, st.st_mtime_ns)
+        except OSError:
+            sig = None
+        if sig is not None:
+            hit = _HEADER_CACHE.get(key)
+            if hit and hit[0] == sig:
+                return hit[1]
     with open(asar, "rb") as f:
         head = f.read(16)
         if len(head) < 16:
@@ -1573,7 +1679,10 @@ def _read_asar_header(asar: Path):
         blob = f.read(f3)
     if len(blob) != f3:
         raise ValueError(f"asar 头被截断: {asar}")
-    return json.loads(blob.decode("utf-8")), 8 + f1
+    parsed = (json.loads(blob.decode("utf-8")), 8 + f1)
+    if sig is not None:
+        _HEADER_CACHE[key] = (sig, parsed)
+    return parsed
 
 
 def _asar_header_raw(asar: Path):
@@ -1767,7 +1876,8 @@ def _repack_asar(asar: Path, overwrite: dict[str, bytes], remove: set[str]) -> i
 
 def _repack_asar_locked(asar: Path, overwrite: dict[str, bytes], remove: set[str]) -> int:
     """`_repack_asar` 的加锁实现体（持锁调用，不要直接调用）。"""
-    header, data_start = _read_asar_header(asar)
+    # 必须绕过 header 缓存：下面会原地改写 header 树（插入/删除条目、重排 offset）
+    header, data_start = _read_asar_header(asar, use_cache=False)
 
     # overwrite 中树里尚不存在的路径（新增文件）按层级插入占位条目
     for p in overwrite:
@@ -2504,10 +2614,20 @@ def _pgrep_hits_are_alive(pids: "list[str]", cmdline_of=None) -> bool:
 
 
 def zcode_running() -> bool:
-    """ZCode 是否在运行（打补丁前预检：运行中会锁住 app.asar，配置也可能被回写覆盖）。"""
+    """ZCode 是否在运行（打补丁前预检：运行中会锁住 app.asar，配置也可能被回写覆盖）。
+
+    ★ Windows 优先走 ctypes 枚举：看护每 3–10s 调一次，`tasklist` 每次要 spawn
+    一个 ≈320ms 的进程（本机实测），24h 累计 ≈46 分钟 CPU；EnumProcesses 只要
+    几毫秒。ctypes 路不可用时仍回退 tasklist，判定口径保持一致。
+    """
     try:
         if os.name == "nt":
-            # 用 bytes 检索：tasklist 输出是 GBK，text=True 会在读线程抛 UnicodeDecodeError
+            paths = _win_process_paths()
+            if paths is not None:
+                return any(PureWindowsPath(p).name.lower() == "zcode.exe"
+                           for p in paths)
+            # 回退：用 bytes 检索：tasklist 输出是 GBK，text=True 会在读线程抛
+            # UnicodeDecodeError
             out = subprocess.run(["tasklist"], capture_output=True, timeout=15,
                                  **no_window_kwargs()).stdout or b""
             return b"ZCode.exe" in out
