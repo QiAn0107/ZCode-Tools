@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.51-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.52-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -150,6 +150,13 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.52（色阶离散化 + 命中率三段 + 状态条默认输入框上方）
+- **tok/s 改离散色阶**（用户口径）：红橙黄绿蓝靛紫 7 色、每 50 tok/s 一档——0-49 红 `#ef4444` / 50-99 橙 `#f97316` / 100-149 黄 `#eab308` / 150-199 绿 `#22c55e` / 200-249 蓝 `#3b82f6` / 250-299 靛 `#6366f1` / ≥300 紫 `#a855f7`，负值钳红；原线性渐变 `mixHex` 移除（色随值跳档、不插值）；
+- **平均命中改三段**（用户口径，95 归琥珀）：<70 红 `#ef4444`、70≤x≤95 琥珀 `#f97316`、>95 绿 `#22c55e`；`fmtPct` 两位小数口径不变；
+- **位置菜单精简为两项**（用户口径）：右键只留「输入框上方 / 输入框下方」，**默认改为输入框上方**——`composer-above` 用 `findComposerCard()` + `insertAdjacentElement("beforebegin", host)` 插到输入框卡片之前，新增镜像 `fitGapAbove`（量胶囊下沿↔卡片上沿、marginBottom 增量抵到 2px，只撤自己插入的空白；前面有兄弟元素对称补 marginTop；不用 translateY 避免顶穿 sticky 输入框容器）；composer-below 保持 `afterend` + 原 fitGap；
+- **删除** `toolbar` / `session-top` 两模式及其专用 finder（`findToolbarRow` / `findSessionScroller`）；旧用户 localStorage 若存这两值，getPos 校验失败自动回落到新的默认 `composer-above`，无需迁移；
+- **测试**：全量 367 项通过；pct-smoke §④ 改为真跑离散色阶（7 档首尾 + 命中率三段边界，含 95 归琥珀）；daily-smoke 新增 §⑪ 位置断言（两项/默认上方/beforebegin/fitGapAbove）；test_patcher 侧栏隔离断言改双 insertAdjacentElement + 新增两项菜单锁；`scriptVersion` 3.29-redhit300→3.30-palette-above。
 
 #### 0.6.51（渐变锚点微调：命中率 0% 橙→红（红→绿），tok/s 紫端 400→300）
 - 用户口径：平均命中率渐变 0% 由橙改**红** `#ef4444`（红→绿语义色，命中高=省钱）；tok/s 紫端由 400 提前到 **300 tok/s**（`TPS_GRAD_MAX` 300，中点 150 = `#cc4d9e`）；两端钳制不变；

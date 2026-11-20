@@ -230,7 +230,7 @@ python "<skill目录>/scripts/zcode_patcher.py" --model-puller
 
 | 能力 | 说法 | 命令 | 改哪里 |
 |---|---|---|---|
-| 打开状态栏 | 输入框下方居中统计条（**v2 纯 DOM 观测，3.12.2+ 安全**；右键可切工具栏/会话顶部 sticky）：即时指标（首 token/tok/s）+ 会话累计（N轮N步、输入/输出/平均命中率）+ 今日总耗 | `python zcode_patcher.py --tps-footer [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
+| 打开状态栏 | 输入框上方居中统计条（0.6.52 起默认，右键可切下方；**v2 纯 DOM 观测，3.12.2+ 安全**）：即时指标（首 token/tok/s）+ 会话累计（N轮N步、输入/输出/平均命中率）+ 今日总耗 | `python zcode_patcher.py --tps-footer [--check/--revert]` | app.asar（重打包级：注入脚本 + 挂载 index.html） |
 | 模型拉取按钮 | 设置页一键拉取/勾选模型 | `python zcode_patcher.py --model-puller [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
 | **增强提示词** | 输入框旁一键润色草稿（可恢复原文）；**右键**弹出菜单选择使用哪个模型 | `python zcode_patcher.py --enhance-prompt [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
 | **注入状态角标** | 主窗口左上角黑底金字「待注入」角标（补丁待写入时出现），点击弹确认窗 → 退出 ZCode → 看护注入 → 自动重启 | `python zcode_patcher.py --inject-status [--check/--revert]` | app.asar（重打包级：renderer 脚本 + index.html + preload 桥 + main IPC） |
@@ -405,7 +405,7 @@ python zcode_patcher.py --enhance-prompt --check
 
 > 本能力与思考等级补丁基于社区分享版本实现（原作者已授权"可以直接借鉴定制"）；本仓库在原基础上做了打包内核重写（纯 Python、保留 unpacked、原子替换）、跨平台/跨版本适配、全外科手术式还原等工程化改造。
 
-**默认挂在输入框（composer 卡片）下方、水平居中**的独立统计行（右键可切到工具栏行内居中或会话顶部 sticky），左组为即时指标，中组为**当前会话累计**，右组为**今日总耗**（不含时间）：
+**默认挂在输入框（composer 卡片）上方、水平居中**的独立统计行（右键可切到下方），左组为即时指标，中组为**当前会话累计**，右组为**今日总耗**（不含时间）：
 
 ```
 生成中:  ● 32 tok/s │ 12轮34步 · 输入 45.2k · 输出 12.3k · 平均命中 84.00% │ 总耗 58.1k
@@ -440,11 +440,10 @@ python zcode_patcher.py --tps-footer --tps-src /path/to/zcode-tps.js   # 指定�
 
 ### 位置切换（胶囊右键）
 
-统计条右键弹出自绘菜单，可在「输入框下方（默认）/ 输入框工具栏 / 会话顶部 sticky」间切换，`localStorage`（键 `ztps-pos`）记忆，重开保持：
+统计条右键弹出自绘菜单，**0.6.52 起仅可在「输入框上方（默认）/ 输入框下方」两项间切换**，`localStorage`（键 `ztps-pos`）记忆，重开保持；旧的 `toolbar`/`session-top` 值校验失败自动回落到「输入框上方」：
 
-- **输入框下方**：composer 卡片之后的独立行（`insertAdjacentElement` 于卡片后），`alignSelf: stretch` 与输入框同宽；**实测像素间距对齐**（0.6.27）：不再猜父容器 `gap`（Tailwind `space-y-*`／margin 布局读不到，0.6.25 的 `rowGap` 方案会静默失效），挂载后量「胶囊上沿↔卡片下沿」「胶囊下沿↔下一元素」，用 `marginTop/marginBottom` **增量**抵到 `GAP_TARGET=2px`（绝对值反算会在 0 与 -gap 间自激振荡），偏差 <0.5px 即停写；**末位元素另走视觉位移**（0.6.29）：胶囊是父容器最后一个子元素时负 `marginBottom` 只压缩容器总高、不会让胶囊下移，改用 `translateY(min(父边框盒底−胶囊下沿−2, 16))` 沉进 padding；快路径 1s 节流重量，布局/窗口/主题变化自动跟随。
-- **输入框工具栏**：行内水平居中。
-- **会话顶部**：吸附到消息区滚动容器（从 `section[data-turn-id]` 向上找第一个 `overflow-y: auto/scroll` 且高 >120px 的祖先）第一个子元素，`position: sticky; top: 8px` 悬浮；host 上 `pointer-events: none` 放行下方消息。
+- **输入框上方（0.6.52 起默认）**：composer 卡片之前的独立行（`insertAdjacentElement("beforebegin", host)`），`alignSelf: stretch` 与输入框同宽；间距走镜像 `fitGapAbove`：量「胶囊下沿↔卡片上沿」用 `marginBottom` 增量抵到 `GAP_TARGET=2px`（只撤自己插入的空白、不吞应用原生间距），前面有兄弟元素时对称补 `marginTop`；不用 `translateY`（上方无「容器底边框沉入」场景，避免把 sticky 输入框容器顶穿）。
+- **输入框下方**：composer 卡片之后的独立行（`insertAdjacentElement("afterend", host)`），**实测像素间距对齐**（0.6.27）：不再猜父容器 `gap`（Tailwind `space-y-*`／margin 布局读不到，0.6.25 的 `rowGap` 方案会静默失效），挂载后量「胶囊上沿↔卡片下沿」「胶囊下沿↔下一元素」，用 `marginTop/marginBottom` **增量**抵到 `GAP_TARGET=2px`（绝对值反算会在 0 与 -gap 间自激振荡），偏差 <0.5px 即停写；**末位元素另走视觉位移**（0.6.29）：胶囊是父容器最后一个子元素时负 `marginBottom` 只压缩容器总高、不会让胶囊下移，改用 `translateY(min(父边框盒底−胶囊下沿−2, 16))` 沉进 padding；快路径 1s 节流重量，布局/窗口/主题变化自动跟随。
 - 数据层零改动，仅挂载点不同；挂载点找不到（空态/设置页）时自清理，`window.__ztpsDiag.posMode`/`hiddenReason` 可诊断。右键修复注记：菜单用 pointerdown 捕获关外部点击时必须放行菜单内部按下，否则 click 在已移除节点上落空、选项永远点不中。
 
 ### 数据链路原理（无常驻服务）

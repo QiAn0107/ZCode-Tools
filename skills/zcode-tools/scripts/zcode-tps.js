@@ -32,7 +32,7 @@
  * 基于社区分享版本实现，仅删除 port.start() 一行并补充诊断，计算逻辑与原版一致。
  *
  * 安全：只读事件流、只写自己的 host 元素；异常静默；找不到工具栏行时自清理。
- * 位置切换：胶囊右键菜单可在「输入框工具栏(默认) / 会话顶部(sticky)」间切换，
+ * 位置切换：胶囊右键菜单可在「输入框上方(默认) / 输入框下方」间切换，
  *   localStorage 记忆（键 ztps-pos）；数据层零改动，仅挂载点不同。
  * 回滚：脚本/补丁异常时用 scripts/restore_clean.py --latest 秒级还原，无需重装。
  */
@@ -45,15 +45,14 @@
   // ---------- 位置切换(胶囊右键菜单,localStorage 记忆) ----------
   const POS_KEY = "ztps-pos";
   const POSITIONS = [
+    { id: "composer-above", label: "输入框上方" },
     { id: "composer-below", label: "输入框下方" },
-    { id: "toolbar", label: "输入框工具栏" },
-    { id: "session-top", label: "会话顶部" },
   ];
   const getPos = () => {
     try {
       const v = localStorage.getItem(POS_KEY);
-      return POSITIONS.some((p) => p.id === v) ? v : "composer-below";
-    } catch (err) { return "composer-below"; }
+      return POSITIONS.some((p) => p.id === v) ? v : "composer-above";
+    } catch (err) { return "composer-above"; }
   };
   const setPos = (id) => { try { localStorage.setItem(POS_KEY, id); } catch (err) { /* 静默 */ } };
 
@@ -220,24 +219,6 @@
     try {
       return !!el.closest("[data-workspace-conversation-frame]");
     } catch (err) { return false; }
-  }
-
-  // 会话顶部 sticky 的挂载点:当前会话消息区的滚动容器。
-  // 从轮次 section 向上找第一个纵向可滚动的祖先(主内容区特征:overflow auto/scroll 且足够高)。
-  function findSessionScroller() {
-    const mainFrame = document.querySelector("[data-workspace-conversation-frame]");
-    const scope = mainFrame || document;
-    let secs = Array.from(scope.querySelectorAll("section[data-turn-id]")).filter((s) => !isInsideSidePane(s));
-    const sec = secs[0];
-    let cur = sec ? sec.parentElement : null;
-    while (cur && cur !== document.body) {
-      if (isInsideSidePane(cur)) break;
-      let oy = "";
-      try { oy = getComputedStyle(cur).overflowY; } catch (err) { /* ignore */ }
-      if (/(auto|scroll)/.test(oy) && cur.clientHeight > 120) return cur;
-      cur = cur.parentElement;
-    }
-    return null;
   }
 
   let posMenu = null;
@@ -566,21 +547,12 @@
     if (!Number.isFinite(n)) return "0.00";
     return (Math.round(n * 100 + 1e-9) / 100).toFixed(2);
   };
-  // ---------- 渐变色（0.6.51 用户口径）----------
-  // tok/s:0→红、300→紫,中间线性插值;命中率:0%→红、100%→绿(命中高=省钱)。
-  // 两端钳制;亮/暗主题下 #ef4444/#a855f7/#22c55e 均可读。
-  const mixHex = (a, b, t) => {
-    const k = Math.max(0, Math.min(1, t));
-    const rgb = [0, 1, 2].map((i) => {
-      const pa = parseInt(a.slice(1 + i * 2, 3 + i * 2), 16);
-      const pb = parseInt(b.slice(1 + i * 2, 3 + i * 2), 16);
-      return Math.round(pa + (pb - pa) * k).toString(16).padStart(2, "0");
-    });
-    return "#" + rgb.join("");
-  };
-  const TPS_GRAD_MAX = 300;
-  const colorTps = (v) => mixHex("#ef4444", "#a855f7", (v || 0) / TPS_GRAD_MAX);
-  const colorHit = (pct) => mixHex("#ef4444", "#22c55e", (pct || 0) / 100);
+  // ---------- 离散色阶（0.6.52 用户口径）----------
+  // tok/s:红橙黄绿蓝靛紫 7 档,每 50 一档（0-49 红 … 250-299 靛,≥300 紫,负值钳红）。
+  // 平均命中:<70 红、70≤x≤95 琥珀、>95 绿（95 归琥珀,用户确认）。
+  const TPS_PALETTE = ["#ef4444", "#f97316", "#eab308", "#22c55e", "#3b82f6", "#6366f1", "#a855f7"];
+  const colorTps = (v) => TPS_PALETTE[Math.max(0, Math.min(6, Math.floor((v || 0) / 50)))];
+  const colorHit = (pct) => pct < 70 ? "#ef4444" : pct <= 95 ? "#f97316" : "#22c55e";
   const fmtStamp = (ms) => {
     if (ms == null) return null;
     const d = new Date(ms), now = new Date();
@@ -701,68 +673,19 @@
     return card || null;
   }
 
-  function findToolbarRow() {
-    const card = findComposerCard();
-    if (!card || isInsideSidePane(card)) return null;
-
-    // 从某元素向上找「工具栏行」：class 同时含 flex 与 items-end 的 div，且不得越过 card
-    const rowFrom = (el, card) => {
-      let cur = el;
-      while (cur && cur !== card.parentElement) {
-        if (cur.tagName === "DIV") {
-          const c = typeof cur.className === "string" ? cur.className : "";
-          if (/(^|\s)flex(\s|$)/.test(c) && /items-end/.test(c)) return cur;
-        }
-        cur = cur.parentElement;
-      }
-      return null;
-    };
-
-    // ① 首选：发送/停止按钮向上找工具栏行（生成中发送按钮会被官方切换为停止按钮 v4-stop）。
-    let picked = null;
-    try {
-      const btn = card.querySelector("[data-testid='v4-composer-send'], [data-testid='v4-stop']");
-      if (btn) picked = rowFrom(btn, card);
-    } catch (err) { /* ignore */ }
-
-    // ② 回退：card 内所有 items-end 行，取含交互控件的那一行（或最后一个）
-    if (!picked) {
-      const rows = Array.from(card.querySelectorAll("div")).filter((el) => {
-        const c = typeof el.className === "string" ? el.className : "";
-        return /(^|\s)flex(\s|$)/.test(c) && /items-end/.test(c);
-      });
-      if (diag) diag.rowCandidates = rows.length;
-      if (!rows.length) return null;
-      picked = rows.find((el) => el.querySelector("button,select,[role='combobox'],input")) ||
-               rows[rows.length - 1];
-    } else if (diag) {
-      diag.rowCandidates = 1;
-      diag.rowVia = "send-button";
-    }
-
-    if (diag) {
-      diag.pickedRowText = (picked.textContent || "").slice(0, 60);
-      diag.pickedRowClass = String(picked.className || "").slice(0, 120);
-      diag.cardTag = card.tagName;
-    }
-    return picked;
-  }
-
   // 诊断对象（console 里直接看 window.__ztpsDiag）
   let diag = null;
   try {
     diag = window.__ztpsDiag = window.__ztpsDiag || {};
-    diag.scriptVersion = "3.29-redhit300";
+    diag.scriptVersion = "3.30-palette-above";
     diag.loadedAt = new Date().toISOString();
   } catch (err) { /* ignore */ }
 
   // ---------- 挂载点 ----------
-  // 三种模式共用同一个 host(含内层 pill);切换模式时搬移节点并重置样式。
-  //   composer-below: composer 卡片之后的独立一行(默认),与输入框同宽,承载会话累计统计
-  //   toolbar:        工具栏行内水平居中
-  //   session-top:    消息区滚动容器首子元素,sticky 吸顶;负 margin-bottom 抵消文档流占位,
-  //                   host 上 pointer-events:none 放行下方消息,胶囊本体恢复 auto
-  // composer-below 的纵向间距：不猜布局（gap / space-y / margin 各家不同），
+  // 两种模式共用同一个 host(含内层 pill);切换模式时搬移节点并重置样式。
+  //   composer-above: composer 卡片之前的独立一行(0.6.52 起默认),与输入框同宽
+  //   composer-below: composer 卡片之后的独立一行,与输入框同宽
+  // 两种模式的纵向间距：不猜布局（gap / space-y / margin 各家不同），
   // 直接量「胶囊上沿到卡片下沿」「胶囊下沿到下一元素」的实际像素，用等量负 margin 抵消，
   // 使视觉间距恒为 GAP_TARGET。布局变更/窗口缩放后再量一次即自适应。
   const GAP_TARGET = 2;   // 目标视觉间距(px)
@@ -811,72 +734,78 @@
       }
     } catch (err) { /* 静默 */ }
   }
+  // composer-above 专用:镜像 fitGap 的增量补偿——量「胶囊下沿↔卡片上沿」,
+  // 用 marginBottom 抵到 GAP_TARGET;只撤掉自己插入的那份空白(cap),不吞应用原生间距。
+  // 前面有兄弟元素时对称补偿 marginTop;上方没有「容器底边框沉入」场景,不用 translateY,
+  // 避免把 sticky 输入框容器顶穿。
+  function fitGapAbove(host, card) {
+    if (!host || !card || !host.isConnected || !card.isConnected) return;
+    try {
+      const c = card.getBoundingClientRect();
+      let h = host.getBoundingClientRect();
+      const rawBottom = (c.top - h.bottom) - px(host.style.marginBottom);
+      const cap = Math.max(0, rawBottom);
+      const botErr = (c.top - h.bottom) - GAP_TARGET;   // 正=离卡片还太远 负=贴太近
+      if (Math.abs(botErr) > 0.5) {
+        const delta = botErr > 0 ? Math.min(botErr, cap) : botErr;
+        host.style.marginBottom = (px(host.style.marginBottom) - delta) + "px";
+        h = host.getBoundingClientRect();
+      }
+      const prev = host.previousElementSibling;
+      if (prev) {
+        const pr = prev.getBoundingClientRect();
+        const rawTop = (h.top - pr.bottom) - px(host.style.marginTop);
+        const capTop = Math.max(0, rawTop);
+        const topErr = (h.top - pr.bottom) - GAP_TARGET;
+        if (Math.abs(topErr) > 0.5) {
+          const deltaTop = topErr > 0 ? Math.min(topErr, capTop) : topErr;
+          host.style.marginTop = (px(host.style.marginTop) - deltaTop) + "px";
+        }
+        host.style.transform = "";
+        if (diag) { diag.gapSink = 0; diag.gapNext = true; }
+      } else {
+        host.style.marginTop = "0px";
+        host.style.transform = "";
+        if (diag) { diag.gapSink = 0; diag.gapNext = false; }
+      }
+    } catch (err) { /* 静默 */ }
+  }
   function attach(host, mode) {
     const changed = host.getAttribute("data-ztps-mode") !== mode;
     // 快路径：宿主已在文档树中、模式未变、且处于正确的父/兄弟节点下，无需重新查找 composer，0开销返回
     if (!changed && host.isConnected && host._target && host._target.isConnected) {
+      // 低频重量：布局(gap 变化/窗口缩放/主题切换)漂移后自动重新对齐，1s 节流
+      const now = Date.now();
       if (mode === "composer-below" && host.previousElementSibling === host._target) {
-        // 低频重量：布局(gap 变化/窗口缩放/主题切换)漂移后自动重新对齐，1s 节流
-        const now = Date.now();
         if (!host._fitAt || now - host._fitAt > 1000) { fitGap(host, host._target); host._fitAt = now; }
         return true;
       }
-      if (mode === "session-top" && host.parentElement === host._target) return true;
-      if (mode === "toolbar" && host.parentElement === host._target) return true;
+      if (mode === "composer-above" && host.nextElementSibling === host._target) {
+        if (!host._fitAt || now - host._fitAt > 1000) { fitGapAbove(host, host._target); host._fitAt = now; }
+        return true;
+      }
     }
-    if (mode === "composer-below") {
-      const card = findComposerCard();
-      if (!card || !card.parentElement || isInsideSidePane(card)) return false;
-      if (changed || host.parentElement !== card.parentElement || host.previousElementSibling !== card) {
-        card.insertAdjacentElement("afterend", host);
-        host.setAttribute("data-ztps-mode", mode);
-        host.style.cssText = "";
-        Object.assign(host.style, {
-          display: "flex", justifyContent: "center",
-          alignItems: "center",
-          marginTop: "0", marginBottom: "0", padding: "0",
-          alignSelf: "stretch",          // 与 composer 卡片同宽
-          pointerEvents: "auto",
-        });
-        // 插入完成后量一次实际空白并抵消（rAF 保证拿到最终布局）
-        try { requestAnimationFrame(() => { fitGap(host, card); host._fitAt = Date.now(); }); } catch (err) { /* 静默 */ }
-      }
-      host._target = card;
-    } else if (mode === "session-top") {
-      const sc = findSessionScroller();
-      if (!sc || isInsideSidePane(sc)) return false;
-      if (changed || host.parentElement !== sc) {
-        sc.insertBefore(host, sc.firstChild);
-        host.setAttribute("data-ztps-mode", mode);
-        host.style.cssText = "";
-        Object.assign(host.style, {
-          position: "sticky", top: "8px", zIndex: "30",
-          width: "100%", height: "22px",
-          display: "flex", justifyContent: "center",
-          margin: "0 0 -30px", padding: "0",
-          pointerEvents: "none",
-        });
-      }
-      host._target = sc;
-    } else {
-      const row = findToolbarRow();
-      if (!row || isInsideSidePane(row)) return false;
-      if (changed || host.parentElement !== row) {
-        row.insertBefore(host, row.children[1] || null);
-        host.setAttribute("data-ztps-mode", mode);
-        host.style.cssText = "";
-        Object.assign(host.style, {
-          display: "inline-flex", flex: "0 1 auto",
-          minWidth: "0", maxWidth: "50%",
-          marginLeft: "auto", marginRight: "auto",   // 两侧 auto = 工具栏行内水平居中
-          alignSelf: "center", height: "22px",
-          margin: "0", padding: "0", position: "static",
-          pointerEvents: "auto",
-        });
-        row.style.alignItems = "center";
-      }
-      host._target = row;
+    // 输入框上方/下方共用 composer 卡片锚点,只是插入方向相反（beforebegin / afterend）
+    const card = findComposerCard();
+    if (!card || !card.parentElement || isInsideSidePane(card)) return false;
+    const sibling = mode === "composer-above" ? host.nextElementSibling : host.previousElementSibling;
+    if (changed || host.parentElement !== card.parentElement || sibling !== card) {
+      if (mode === "composer-above") card.insertAdjacentElement("beforebegin", host);
+      else card.insertAdjacentElement("afterend", host);
+      host.setAttribute("data-ztps-mode", mode);
+      host.style.cssText = "";
+      Object.assign(host.style, {
+        display: "flex", justifyContent: "center",
+        alignItems: "center",
+        marginTop: "0", marginBottom: "0", padding: "0",
+        alignSelf: "stretch",          // 与 composer 卡片同宽
+        pointerEvents: "auto",
+      });
+      // 插入完成后量一次实际空白并抵消（rAF 保证拿到最终布局）
+      const fit = mode === "composer-above" ? fitGapAbove : fitGap;
+      try { requestAnimationFrame(() => { fit(host, card); host._fitAt = Date.now(); }); } catch (err) { /* 静默 */ }
     }
+    host._target = card;
     const pill = host.firstChild;
     if (pill) {
       pill.style.pointerEvents = "auto";
@@ -1143,7 +1072,7 @@
         segs = [];
         if (s.ttft != null && s.ttft >= 0) segs.push({ p: 1, g: 0, nodes: [span("首 token "), span(fmtLat(s.ttft), "VALUE")] });
         if (s.tps != null) {
-          // 速度渐变（0.6.51 用户口径）：0 tok/s→红、300→紫，随流式/结算值实时变化
+          // 速度色阶（0.6.52）：红橙黄绿蓝靛紫，每 50 tok/s 一档，随流式/结算值实时变化
           const sp = span(fmtTps(s.tps) + " tok/s");
           sp.style.color = colorTps(s.tps);
           segs.push({ p: 2, g: 0, nodes: [sp] });
@@ -1156,7 +1085,7 @@
         if (agg.output > 0) segs.push({ p: 6, g: 1, nodes: [span("输出 "), span(fmtTok(agg.output), "VALUE")] });
         if (agg.input > 0) {
           const pct = (agg.cache / agg.input) * 100;
-          // 命中率渐变（语义色）：0%→红（命中低=贵）、100%→绿（命中高=省钱）
+          // 命中率三段（0.6.52）：<70 红、70~95 琥珀、>95 绿（95 归琥珀）
           const sp = span(" 平均命中 " + fmtPct(pct) + "%");
           sp.style.color = colorHit(pct);
           segs.push({ p: 5.6, g: 1, nodes: [sp] });

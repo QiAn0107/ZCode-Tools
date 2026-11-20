@@ -2286,8 +2286,19 @@ class TestTpsSidePaneIsolation(unittest.TestCase):
 
     def test_card_and_attach_refuse_side_pane(self):
         self.assertIn("isInsideSidePane(card)", self.src)
-        self.assertIn("isInsideSidePane(row)", self.src)
-        self.assertIn("isInsideSidePane(sc)", self.src)
+        # 0.6.52：位置菜单只剩「输入框上方/下方」,两者共用 composer 卡片锚点;
+        # 上方插卡片之前（beforebegin）、下方插之后（afterend）,均须过侧栏守卫。
+        self.assertIn('insertAdjacentElement("beforebegin", host)', self.src)
+        self.assertIn('insertAdjacentElement("afterend", host)', self.src)
+
+    def test_positions_only_above_and_below(self):
+        """0.6.52：右键位置菜单只有两项、默认输入框上方；toolbar/session-top 已移除。"""
+        self.assertIn('{ id: "composer-above", label: "输入框上方" }', self.src)
+        self.assertIn('{ id: "composer-below", label: "输入框下方" }', self.src)
+        self.assertNotIn('id: "toolbar"', self.src)
+        self.assertNotIn('id: "session-top"', self.src)
+        self.assertIn('v : "composer-above"', self.src)
+        self.assertIn("function fitGapAbove(host, card)", self.src)
 
     def test_tps_bar_layout_session_io_and_daily_total(self):
         """TPS 状态栏布局：即时(首 token/tok/s) + 会话累计(轮数/步数/输入/输出/平均命中) + 今日总耗。

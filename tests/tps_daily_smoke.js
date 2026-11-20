@@ -181,7 +181,7 @@ check(/const room = bBottom - h\.bottom - GAP_TARGET/.test(src),
 check(/now - host\._fitAt > 1000/.test(src),
       "缺重量节流，布局/窗口变化后补偿不会刷新");
 check(!/parentRowGap/.test(src), "旧的 parentRowGap 猜测式补偿应已移除");
-check(/scriptVersion = "3\.29-redhit300"/.test(src), "脚本版本号未同步到 3.29-redhit300");
+check(/scriptVersion = "3\.30-palette-above"/.test(src), "脚本版本号未同步到 3.30-palette-above");
 
 // ---------- ⑤ 早到 delta pending 回放 ----------
 // 首批带 input 的 delta 常早于 turnHeader/respTurn 桥接到达：必须暂存待回放，
@@ -253,6 +253,20 @@ check(/latest\.lastUsageAt \|\| latest\.endedAt \|\| 0/.test(src) && /evAt \+ 30
 check(/snapshotTpsApplied/.test(src), "diag 缺 snapshotTpsApplied，兜底是否生效无法定位");
 check(/lastPushStamp/.test(src), "diag 缺 lastPushStamp，推送是否到达无法定位");
 check(/pushSubscribed/.test(src), "diag 缺 pushSubscribed，订阅是否成功无法定位");
+
+// ---------- ⑪ 位置仅两项 + 默认输入框上方（0.6.52） ----------
+// 右键菜单只保留「输入框上方 / 输入框下方」,默认与未保存时都回落到 composer-above;
+// toolbar/session-top 已移除;上方挂载用 beforebegin + 镜像间距 fitGapAbove。
+check(/const POSITIONS = \[[\s\S]*?\{ id: "composer-above", label: "输入框上方" \},[\s\S]*?\{ id: "composer-below", label: "输入框下方" \},?\s*\];/.test(src),
+      "位置菜单必须只有「输入框上方 / 输入框下方」两项且顺序正确");
+check(!/id: "toolbar"|id: "session-top"/.test(src), "toolbar/session-top 旧模式未移除（菜单应只有两项）");
+check(/POSITIONS\.some\(\(p\) => p\.id === v\) \? v : "composer-above"/.test(src) &&
+      /catch \(err\) \{ return "composer-above"; \}/.test(src),
+      "getPos 默认值/异常兜底必须改为 composer-above（输入框上方）");
+check(/card\.insertAdjacentElement\("beforebegin", host\)/.test(src),
+      "输入框上方必须用 beforebegin 插到 composer 卡片之前");
+check(/function fitGapAbove\(host, card\)/.test(src) && /const fit = mode === "composer-above" \? fitGapAbove : fitGap/.test(src),
+      "上方模式必须用镜像间距补偿 fitGapAbove（下方仍用 fitGap）");
 
 // ---------- ⑩ 状态点呼吸灯（0.6.49 用户口径） ----------
 // 生成中=琥珀呼吸灯（CSS keyframes,仅 opacity 合成器动画,零重排）,空闲=绿色静态;

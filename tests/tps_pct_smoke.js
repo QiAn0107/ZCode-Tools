@@ -124,10 +124,10 @@ check(/agg\.rounds,\s*agg\.steps,\s*agg\.input,\s*agg\.cache.*agg\.output,[\s\S]
 check(/for \(const drop of \[7, 1, 2, 3\]\)/.test(src),
       "渐进降级顺序不对:应先丢总耗(7),再丢首 token(1)/tok/s(2),轮步(3)最后");
 
-// ---------- ④ 速度/命中率渐变色（0.6.51 用户口径）真跑 ----------
-// tok/s:0→红(#ef4444)、300→紫(#a855f7),中间线性插值,两端钳制;
-// 命中率:0%→红(#ef4444)、100%→绿(#22c55e,命中高=省钱)。渲染路径必须经 colorTps/colorHit
-// 着色,不得残留固定 ACCENT;内容签名已含 s.tps 与 agg.cache/input,色随值自动重绘。
+// ---------- ④ 速度/命中率离散色（0.6.52 用户口径）真跑 ----------
+// tok/s:红橙黄绿蓝靛紫 7 档、每 50 一档（0-49 红 … ≥300 紫,负值钳红）;
+// 命中率:<70 红、70≤x≤95 琥珀、>95 绿（95 归琥珀,用户确认）。渲染路径必须经
+// colorTps/colorHit 着色,不得残留固定 ACCENT;内容签名已含 s.tps 与 agg.cache/input,色随值自动重绘。
 function extractDecl(kind, name) {
   const head = kind + " " + name + " = ";
   const i = src.indexOf(head);
@@ -144,34 +144,34 @@ function extractDecl(kind, name) {
   }
   return null;
 }
-const colorDecls = [extractDecl("const", "mixHex"), extractDecl("const", "TPS_GRAD_MAX"),
+const colorDecls = [extractDecl("const", "TPS_PALETTE"),
                     extractDecl("const", "colorTps"), extractDecl("const", "colorHit")];
-check(colorDecls.every(Boolean), "源码里抠不出渐变色模块（mixHex/colorTps/colorHit 被改名或删除了？）");
+check(colorDecls.every(Boolean), "源码里抠不出离散色模块（TPS_PALETTE/colorTps/colorHit 被改名或删除了？）");
 if (colorDecls.every(Boolean)) {
   let colors = null;
   try {
     // eslint-disable-next-line no-eval
     colors = eval("(function(){ " + colorDecls.join("\n") + "\nreturn { colorTps, colorHit }; })")();
   } catch (err) {
-    check(false, "渐变色模块源码无法求值", err.message);
+    check(false, "离散色模块源码无法求值", err.message);
   }
   if (colors) {
-    const PURPLE = "#a855f7", GREEN = "#22c55e", RED = "#ef4444";
-    check(colors.colorTps(0) === RED, "colorTps(0) 应为红端", colors.colorTps(0));
-    check(colors.colorTps(300) === PURPLE, "colorTps(300) 应为紫端（0.6.51 用户口径 300 tok/s）", colors.colorTps(300));
-    check(colors.colorTps(150) === "#cc4d9e", "colorTps(150) 应为红紫线性中点", colors.colorTps(150));
-    check(colors.colorTps(1000) === PURPLE && colors.colorTps(-50) === RED,
-          "速度两端必须钳制（>300 与负值都不得越出红紫区间）");
-    check(colors.colorHit(0) === RED, "colorHit(0) 应为红端（0.6.51 用户口径：命中率红→绿）", colors.colorHit(0));
-    check(colors.colorHit(100) === GREEN, "colorHit(100) 应为绿端", colors.colorHit(100));
-    check(colors.colorHit(84) === "#43b05a", "colorHit(84) 应为红绿线性插值", colors.colorHit(84));
-    check(colors.colorTps(10) !== colors.colorTps(200) && colors.colorHit(20) !== colors.colorHit(90),
-          "渐变随速度/命中率变化失效");
+    const [R, O, Y, G, B, I, P] = ["#ef4444", "#f97316", "#eab308", "#22c55e", "#3b82f6", "#6366f1", "#a855f7"];
+    // 7 档边界,每档首尾各测一点
+    for (const [v, want] of [[0, R], [49, R], [50, O], [99, O], [100, Y], [149, Y],
+                             [150, G], [199, G], [200, B], [249, B], [250, I], [299, I],
+                             [300, P], [1000, P], [-50, R]]) {
+      check(colors.colorTps(v) === want, "colorTps(" + v + ") 应为 " + want + "（每 50 一档）", colors.colorTps(v));
+    }
+    // 命中率三段：<70 红、70~95 琥珀、>95 绿；95 归琥珀（用户确认）
+    for (const [v, want] of [[0, R], [69, R], [70, O], [84, O], [95, O], [95.01, G], [100, G]]) {
+      check(colors.colorHit(v) === want, "colorHit(" + v + ") 应为 " + want + "（三段色）", colors.colorHit(v));
+    }
   }
 }
-check(/sp\.style\.color = colorTps\(s\.tps\)/.test(src), "tok/s 段没有走 colorTps 渐变着色");
-check(/sp\.style\.color = colorHit\(pct\)/.test(src), "平均命中段没有走 colorHit 渐变着色");
-check(!/ACCENT/.test(src), "旧的固定 ACCENT 着色残留（0.6.47 起应全部换成渐变）");
+check(/sp\.style\.color = colorTps\(s\.tps\)/.test(src), "tok/s 段没有走 colorTps 色阶着色");
+check(/sp\.style\.color = colorHit\(pct\)/.test(src), "平均命中段没有走 colorHit 三段着色");
+check(!/ACCENT/.test(src), "旧的固定 ACCENT 着色残留（0.6.47 起应全部换成色阶）");
 
 // ---------- 汇报 ----------
 if (failures.length) {
