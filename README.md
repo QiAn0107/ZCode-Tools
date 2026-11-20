@@ -1,7 +1,7 @@
 # ZCode-Tools · ZCode 客户端一站式原生增强套件
 
 <p align="left">
-  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.52-blue.svg?style=flat-square" alt="Version"></a>
+  <a href="https://github.com/QiAn0107/ZCode-Tools/releases"><img src="https://img.shields.io/badge/version-0.6.53-blue.svg?style=flat-square" alt="Version"></a>
   <img src="https://img.shields.io/badge/python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white" alt="Python">
   <img src="https://img.shields.io/badge/dependencies-0%20(std%20only)-success.svg?style=flat-square" alt="Dependencies">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square" alt="Platform">
@@ -150,6 +150,15 @@ run.cmd                        # Windows
 
 <details>
 <summary><b>📜 历史版本审计与故障排查记录</b></summary>
+
+#### 0.6.53（TPS 上方布局塌陷修复 + 运行时性能优化）
+- **修复 0.6.52 上方模式回归**：出现提问卡/弹窗时会话记录整片空白、面板位置错乱。根因① `fitGapAbove` 的 cap 用实测间距自我封顶——问题卡把卡片推远后会写出几百 px 负 `marginBottom`，把 sticky composer dock 拉塌；② 全局 `textarea` / `form textarea` 兜底可能把问题卡/弹窗输入框当成 composer，状态条被插进消息流。修法：新增 `isRealComposerCard` 逐候选校验（主会话 frame / composer dock / 非 dialog / 非 `section[data-turn-id]` / 带 composer 控件）；`MAX_FIT_GAP=32` 硬上限 + 相邻性守卫 + margin clamp；真实 composer 不可用时状态条隐藏，关闭后 500ms 内自愈；host 增加 `flexShrink:0` / `minHeight:20px`。新增 `tests/tps_layout_smoke.js`（9 场景：正常上方/问题卡共存/隐藏 composer/500px 大间距/中间插面板/下方模式/关闭自愈/弹窗/无 frame 旧布局）；
+- **性能：asar 不再整包读**：新增 `_asar_read_entry()`，`asar_version()` / `--check` / 注入路径只按 header 的 offset/size 读取所需条目。真实 367MB asar：单进程 `--check --all` 峰值 **407.0MB→44.4MB**、耗时 **2.31–2.38s→1.69–1.71s**；4 个并发 check 的瞬时占用从约 1.2–1.6GB 降到几十 MB；
+- **性能：移除 PostToolUse 钩子**：每次工具调用起一个 Python 进程（本机启动中位数 30ms，300 次调用约 9s CPU）→ 0；回合内刷新交给 main watcher（DB 写入 → 300ms 去抖 → 2500ms 限频 + 30s 心跳），轮末仍有 `Stop` 钩子。watcher 限频 1.5s→2.5s（spawn ≤40→≤24 次/分钟）；
+- **性能：看护自适应轮询**：`apply_after_exit.py` 前 2 分钟 3s、之后 10s；24h `tasklist` 28,800→≈8,668 次，退出检测最坏延迟 10s；
+- **性能：渲染层**：enhance 500→1000ms + `resolveDock/resolveInput/resolveMount` 缓存（正常 tick 0 次 `findDock`）；模型拉取 350→1500ms + 按钮缓存（点击/按键仍 50ms 即时检查）；TPS 500→1000ms + `prune` O(n²)→O(n) + `statsOf` 双指针无数组分配；
+- **评估后放弃**：快照批量 SQL（594→3 条 SELECT）在真实 DB（297 会话、`(session_id,turn_id)` 索引）上 **59.3ms→108.3ms**，逐会话索引查询更快；保留原路径并在 `build_snapshot()` docstring 记录，避免以后按「查询数越少越好」重做；
+- **测试**：全量 378 项通过（6 skipped）；新增 `TestAsarRangedReads` / `TestWatchdogPollBackoff` / `TestRuntimePerfGuards` / TPS layout 9 场景 / PostToolUse 移除断言；`scriptVersion` TPS 3.30-palette-above→3.31-above-guard、enhance 1.9→2.0。新增 `PERFORMANCE.md` + `tests/bench_perf.py`。
 
 #### 0.6.52（色阶离散化 + 命中率三段 + 状态条默认输入框上方）
 - **tok/s 改离散色阶**（用户口径）：红橙黄绿蓝靛紫 7 色、每 50 tok/s 一档——0-49 红 `#ef4444` / 50-99 橙 `#f97316` / 100-149 黄 `#eab308` / 150-199 绿 `#22c55e` / 200-249 蓝 `#3b82f6` / 250-299 靛 `#6366f1` / ≥300 紫 `#a855f7`，负值钳红；原线性渐变 `mixHex` 移除（色随值跳档、不插值）；

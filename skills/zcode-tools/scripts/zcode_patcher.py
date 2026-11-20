@@ -109,13 +109,13 @@ def _sha256(data: bytes) -> str:
 
 
 def asar_version(asar: Path) -> str | None:
-    """从 asar 内 package.json 读客户端版本（读不到返回 None）。"""
+    """从 asar 内 package.json 读客户端版本（只读该条目，不整包读入）。"""
     try:
-        raw, header, data_start = _asar_header_raw(asar)
+        header, data_start = _read_asar_header(asar)
         ent = _asar_find_entry(header, "package.json")
         if not ent:
             return None
-        m = re.search(rb'"version"\s*:\s*"([^"]+)"', _asar_entry_bytes(raw, data_start, ent))
+        m = re.search(rb'"version"\s*:\s*"([^"]+)"', _asar_read_entry(asar, data_start, ent))
         return m.group(1).decode("utf-8", "replace") if m else None
     except Exception:
         return None
@@ -791,7 +791,7 @@ catch(n){return{success:!1,error:String(n)}}});
 # ------------------------------------------------------------ TPS 快照的注入块
 
 # handler + watcher（0.6.42 起）各占一段。watcher 移植自参考实现 inject-main.cjs：
-# 库目录（db.sqlite/-wal/-shm）一有写入 → 300ms 去抖 → 1500ms 限频 + busy 单飞 →
+# 库目录（db.sqlite/-wal/-shm）一有写入 → 300ms 去抖 → 2500ms 限频 + busy 单飞 →
 # 按指针文件 spawn 只读的 tps_snapshot.py --quiet 重算 → 读回快照 → 推给渲染层；
 # 另监听快照文件本身（钩子写的也推）。30s stat 心跳兜底 fs.watch 丢事件；
 # 空闲时零进程零轮询。非 electron 环境（真跑 harness/plain node）import 即败 →
@@ -835,7 +835,7 @@ c.on("error",()=>{clearTimeout(kt);busy=!1});
 c.on("close",()=>{clearTimeout(kt);busy=!1;push()})};
 let maybe=()=>{
 let st=dbStamp();if(!st||st===seen)return;
-if(busy||Date.now()-lastRun<1500){if(!retryT)retryT=setTimeout(()=>{retryT=0;maybe()},300);return}
+if(busy||Date.now()-lastRun<2500){if(!retryT)retryT=setTimeout(()=>{retryT=0;maybe()},300);return}
 seen=st;lastRun=Date.now();runSpawn()};
 let arm=()=>{try{let w=n.watch(dbDir,(ev,f2)=>{if(f2&&!/db\.sqlite/.test(f2))return;clearTimeout(debDb);debDb=setTimeout(maybe,300)});
 w.on("error",()=>{try{w.close()}catch(_){}setTimeout(arm,5000)})}catch(_){setTimeout(arm,5000)}};
@@ -863,7 +863,7 @@ def _tps_snapshot_main_block(ipc_alias: str) -> bytes:
     """在 ipcMain 别名的 SaveMcpToUserDirectory 前插入快照读取 handler + DB watcher。
 
     handler 纯 fs.readFileSync。watcher（0.6.42，移植自参考实现 inject-main.cjs）：
-    fs.watch 库目录（db.sqlite/-wal/-shm）→ 300ms 去抖 + 1500ms 限频 + busy 单飞 +
+    fs.watch 库目录（db.sqlite/-wal/-shm）→ 300ms 去抖 + 2500ms 限频 + busy 单飞 +
     30s stat 心跳 → 按指针文件 zcode-patches-scripts.json spawn 只读的
     tps_snapshot.py --quiet 重算 → 读回快照 → webContents.send("zcode:tps-push")
     推给渲染层；另监听快照文件本身（钩子写的同样推送）。spawn 仅限这一个脚本，
@@ -1587,6 +1587,23 @@ def _asar_entry_bytes(raw: bytes, data_start: int, ent: dict) -> bytes:
     return raw[off:off + ent["size"]]
 
 
+def _asar_read_entry(asar: Path, data_start: int, ent: dict) -> bytes:
+    """按 header 的 offset/size 只读单个条目，不把整包读进内存。
+
+    真实 app.asar 三百多 MB，而 --check/注入只需要 index.html、preload、main、
+    注入脚本这几个条目。整包 read_bytes() 会让每个 --check 子进程瞬时占用约一个
+    包体的内存（4 个并发就是 1GB+），且纯属浪费 I/O。
+    """
+    off = data_start + int(ent["offset"])
+    size = int(ent["size"])
+    with open(asar, "rb") as f:
+        f.seek(off)
+        data = f.read(size)
+    if len(data) != size:
+        raise ValueError(f"asar 条目被截断（offset={ent.get('offset')} size={size}）: {asar}")
+    return data
+
+
 def _asar_integrity(data: bytes, block_size: int = 4194304) -> dict:
     blocks = [hashlib.sha256(data[i:i + block_size]).hexdigest()
               for i in range(0, len(data), block_size)]
@@ -1954,7 +1971,7 @@ def _process_script_inject(asar: Path, check_only: bool, revert: bool, src_path:
 
     try:
         asar_size = asar.stat().st_size
-        raw, header, data_start = _asar_header_raw(asar)
+        header, data_start = _read_asar_header(asar)
     except (OSError, ValueError) as e:
         print(f"[!] {asar}\n    无法读取：{e}")
         return False
@@ -1963,7 +1980,7 @@ def _process_script_inject(asar: Path, check_only: bool, revert: bool, src_path:
     if idx_ent is None:
         print(f"[!] {asar}\n    未找到 {TPS_INDEX_PATH}，版本结构可能已变，跳过")
         return False
-    idx_bytes = _asar_entry_bytes(raw, data_start, idx_ent)
+    idx_bytes = _asar_read_entry(asar, data_start, idx_ent)
     tagged = tag_b in idx_bytes
     installed = tagged and script_entry in paths
 
@@ -1988,7 +2005,7 @@ def _process_script_inject(asar: Path, check_only: bool, revert: bool, src_path:
         # `continue`（视为已一致）→ 脚本改了**永远不生效，而且一句报错都没有**。
         # 特征串必须与模型拉取链路（--model-puller）逐字一致：check_state() 只认「含旧版组件」。
         if installed and src_path.is_file() and \
-                _asar_entry_bytes(raw, data_start, paths[script_entry]) != src_path.read_bytes():
+                _asar_read_entry(asar, data_start, paths[script_entry]) != src_path.read_bytes():
             state = "已打（含旧版组件，重跑可自动更新）"
         print(f"[*] {asar}\n    {label}注入: {state} | sidecar: {'有' if saved else '无'} | 备份: {'有' if bak.is_file() else '无'}")
         return True
@@ -2025,7 +2042,7 @@ def _process_script_inject(asar: Path, check_only: bool, revert: bool, src_path:
     # 脚本热更新：已注入但内容与源不一致时替换脚本条目（无需先 revert）。
     # 只按"脚本条目是否存在"判断会让改动后的脚本永不生效（版本适配修复无法落地）。
     if installed:
-        cur_script = _asar_entry_bytes(raw, data_start, paths[script_entry]) if script_entry in paths else None
+        cur_script = _asar_read_entry(asar, data_start, paths[script_entry]) if script_entry in paths else None
         if cur_script == script_bytes:
             print(f"[=] {asar}\n    已打{label}注入（脚本同源），跳过")
             return True
@@ -2153,7 +2170,7 @@ def _process_ipc_patch(asar: Path, check_only: bool, revert: bool, src_path: Pat
     bak = asar.with_name(asar.name + spec["bak_suffix"])
     try:
         asar_size = asar.stat().st_size
-        raw, header, data_start = _asar_header_raw(asar)
+        header, data_start = _read_asar_header(asar)
     except (OSError, ValueError) as e:
         print(f"[!] {asar}\n    无法读取：{e}")
         return False
@@ -2163,11 +2180,11 @@ def _process_ipc_patch(asar: Path, check_only: bool, revert: bool, src_path: Pat
     if idx_ent is None:
         print(f"[!] {asar}\n    未找到 {TPS_INDEX_PATH}，版本结构可能已变，跳过")
         return False
-    idx_bytes = _asar_entry_bytes(raw, data_start, idx_ent)
+    idx_bytes = _asar_read_entry(asar, data_start, idx_ent)
 
     def _blob(path: str) -> bytes | None:
         ent = paths.get(path)
-        return _asar_entry_bytes(raw, data_start, ent) if ent else None
+        return _asar_read_entry(asar, data_start, ent) if ent else None
 
     pre_blob, main_blob = _blob(PULLER_PRELOAD_PATH), _blob(PULLER_MAIN_PATH)
     script_present = spec["script_entry"] in paths

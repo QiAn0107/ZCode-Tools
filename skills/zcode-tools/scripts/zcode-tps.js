@@ -221,6 +221,50 @@
     } catch (err) { return false; }
   }
 
+  // ---------- composer 真实性校验（0.6.52 上方挂载回归） ----------
+  // 0.6.52 把状态条改为插在 composer 卡片之前后，暴露出两个叠加问题：
+  //   ① 全局 textarea / form textarea 兜底会把问题卡、弹窗、消息区的输入框
+  //      误认成 composer，状态条被插进消息流/问题卡，破坏会话列表布局；
+  //   ② 卡片识别只看 closest，不校验它是否属于 composer dock。
+  // 这里统一做「真实 composer」判定：必须在主会话 frame 内、不在弹窗/问题卡/
+  // 消息轮次里、位于 composer dock 内（或至少不在 timeline 滚动层），并且带
+  // composer 控件（发送/停止/右侧操作区，或 v4-composer + composer 输入框）。
+  const MODAL_SEL = "[role='dialog'], [aria-modal='true'], " +
+    "[data-testid*='dialog'], [data-testid*='modal'], [data-testid*='question']";
+  const COMPOSER_DOCK_SEL = "[data-v4-composer-dock], " +
+    "[data-v4-composer-dock-content], [data-v4-back-to-bottom-anchor]";
+
+  function cardOf(el) {
+    if (!el) return null;
+    let card = null;
+    try { card = el.closest("[data-testid='v4-composer']"); } catch (err) { /* ignore */ }
+    if (card) return card;
+    try {
+      const form = el.closest("form");
+      if (form && form.parentElement) card = form.parentElement;
+    } catch (err) { /* ignore */ }
+    return card || el.parentElement || null;
+  }
+
+  function isRealComposerCard(card) {
+    if (!card || typeof card.closest !== "function") return false;
+    try {
+      if (isInsideSidePane(card)) return false;
+      // 兼容：dock 属性存在时以 dock 为准；旧布局没有 frame 属性时仍可挂载
+      const inDock = card.closest(COMPOSER_DOCK_SEL);
+      if (!inDock && !isInsideMainConversation(card)) return false;
+      if (card.closest(MODAL_SEL)) return false;               // 弹窗/问题卡
+      if (card.closest("section[data-turn-id]")) return false; // 消息轮次里的卡片
+      if (!inDock && card.closest("[data-v4-timeline-scroll]")) return false;
+      if (card.querySelector(
+        "[data-testid='v4-composer-send'], [data-testid='v4-stop'], " +
+        "[data-composer-trailing-actions]")) return true;
+      const tid = (card.getAttribute && card.getAttribute("data-testid")) || "";
+      return tid === "v4-composer" && !!card.querySelector(
+        "[data-testid='v4-composer-input'], [data-testid*='composer-input']");
+    } catch (err) { return false; }
+  }
+
   let posMenu = null;
   function closePosMenu() {
     if (posMenu) {
@@ -572,10 +616,15 @@
     if (t.streaming) {
       out = Math.max(out, t.textTok);   // 流式中 usage 未到，用内容估算补齐（精确值到达后自然切换）
       const now = Date.now();
-      const win = t.win.filter((w) => now - w[0] <= 4000);
-      if (win.length >= 2) {
-        const dt = (win[win.length - 1][0] - win[0][0]) / 1000;
-        const dtok = win[win.length - 1][1] - win[0][1];
+      // 双指针取 4s 窗口：t.win 已由 pushWin 按 6s 裁剪，这里只跳过过期项，
+      // 不再每次渲染都 filter 出一个新数组。
+      const win = t.win;
+      let start = 0;
+      while (start < win.length && now - win[start][0] > 4000) start++;
+      const n = win.length - start;
+      if (n >= 2) {
+        const dt = (win[win.length - 1][0] - win[start][0]) / 1000;
+        const dtok = win[win.length - 1][1] - win[start][1];
         if (dt >= 1 && dtok > 0) tps = dtok / dt;
       }
       if (tps == null && t.lastTps != null) tps = t.lastTps;   // 工具执行等静默期：保持最近速度
@@ -618,41 +667,39 @@
   function findComposerInput() {
     const tried = [];
     for (const sel of COMPOSER_INPUT_SELECTORS) {
+      let els = [];
+      try { els = Array.from(document.querySelectorAll(sel)); } catch (err) { continue; }
+      if (!els.length) continue;
+      // ① 严格剔除侧边栏/辅助对话中的输入框，绝不将状态栏挂入侧边栏
+      els = els.filter((e) => !isInsideSidePane(e));
+      if (!els.length) continue;
+      // ② 优先取处于主会话容器 [data-workspace-conversation-frame] 内的输入框
+      const mainEls = els.filter(isInsideMainConversation);
+      const pool = mainEls.length ? mainEls : els;
+      const vis = pool.filter((e) => e.offsetParent != null);
+      const candidates = vis.length ? vis : pool;
+      // ③ 排序准则：以最靠下为主要准则；但当纵向坐标极度接近（<20px，左右并排）时，
+      //    绝对优先选择靠左（主工作区，left 较小）的主会话输入框，彻底杜绝跳动
+      candidates.sort((a, b) => {
+        const ra = a.getBoundingClientRect();
+        const rb = b.getBoundingClientRect();
+        const dTop = rb.top - ra.top;
+        if (Math.abs(dTop) > 20) return dTop;
+        return ra.left - rb.left;
+      });
+      // ④ 逐个校验卡片身份：问题卡/弹窗/消息区里的输入框直接跳过，
+      //    不能因为「它是唯一候选」就把状态条插进去（0.6.52 布局回归根因）。
       let hit = null;
-      try {
-        let els = Array.from(document.querySelectorAll(sel));
-        if (els.length) {
-          // ① 严格剔除侧边栏/辅助对话中的输入框，绝不将状态栏挂入侧边栏
-          els = els.filter((e) => !isInsideSidePane(e));
-          if (els.length) {
-            // ② 优先取处于主会话容器 [data-workspace-conversation-frame] 内的输入框
-            const mainEls = els.filter(isInsideMainConversation);
-            const pool = mainEls.length ? mainEls : els;
-            if (pool.length === 1) {
-              hit = pool[0];
-            } else {
-              const vis = pool.filter((e) => e.offsetParent != null);
-              const candidates = vis.length ? vis : pool;
-              if (candidates.length === 1) {
-                hit = candidates[0];
-              } else {
-                // ③ 排序准则：以最靠下为主要准则；但当纵向坐标极度接近（<20px，左右并排）时，
-                //    绝对优先选择靠左（主工作区，left 较小）的主会话输入框，彻底杜绝跳动
-                candidates.sort((a, b) => {
-                  const ra = a.getBoundingClientRect();
-                  const rb = b.getBoundingClientRect();
-                  const dTop = rb.top - ra.top;
-                  if (Math.abs(dTop) > 20) return dTop;
-                  return ra.left - rb.left;
-                });
-                hit = candidates[0];
-              }
-            }
-          }
-        }
-      } catch (err) { /* 选择器不合法，跳过 */ }
-      tried.push({ selector: sel, count: hit ? 1 : 0 });
-      if (hit) return { el: hit, tried };
+      for (const el of candidates) {
+        if (!isRealComposerCard(cardOf(el))) continue;
+        hit = el;
+        break;
+      }
+      tried.push({ selector: sel, count: candidates.length, valid: !!hit });
+      if (hit) {
+        if (diag) diag.inputVia = sel;
+        return { el: hit, tried };
+      }
     }
     return { el: null, tried };
   }
@@ -665,19 +712,22 @@
       diag.inputFound = !!ta;
     }
     if (!ta) return null;
-    let card = null;
-    try { card = ta.closest("[data-testid='v4-composer']"); } catch (err) { /* ignore */ }
-    if (!card) card = ta.closest("form") ? ta.closest("form").parentElement : null;
-    if (!card) card = ta.parentElement;
-    if (card && isInsideSidePane(card)) return null;   // 侧边栏卡片直接拒收
-    return card || null;
+    const card = cardOf(ta);
+    if (!card || !isRealComposerCard(card)) return null;   // 侧边栏/问题卡/消息区拒收
+    if (diag) {
+      diag.cardTestid = (card.getAttribute && card.getAttribute("data-testid")) || "";
+      diag.cardInDock = !!(card.closest && card.closest(COMPOSER_DOCK_SEL));
+      diag.cardTag = card.tagName || "";
+      diag.cardParent = card.parentElement ? (card.parentElement.tagName || "") : null;
+    }
+    return card;
   }
 
   // 诊断对象（console 里直接看 window.__ztpsDiag）
   let diag = null;
   try {
     diag = window.__ztpsDiag = window.__ztpsDiag || {};
-    diag.scriptVersion = "3.30-palette-above";
+    diag.scriptVersion = "3.31-above-guard";
     diag.loadedAt = new Date().toISOString();
   } catch (err) { /* ignore */ }
 
@@ -690,21 +740,52 @@
   // 使视觉间距恒为 GAP_TARGET。布局变更/窗口缩放后再量一次即自适应。
   const GAP_TARGET = 2;   // 目标视觉间距(px)
   const MAX_SINK = 16;    // 末位元素最多下沉多少(px)，防止跑到父容器外压到别的东西
+  const MAX_FIT_GAP = 32; // 间距补偿硬上限：超过它说明锚点被布局变化带偏，绝不吞掉
   const px = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; };
+
+  function resetFit(host) {
+    try {
+      host.style.marginTop = "0px";
+      host.style.marginBottom = "0px";
+      host.style.transform = "";
+    } catch (err) { /* 静默 */ }
+  }
+
   function fitGap(host, card) {
     if (!host || !card || !host.isConnected || !card.isConnected) return;
     try {
-      // 增量累积修正：测量值本身包含上一次的 margin，必须「当前 margin - 实测偏差」，
-      // 不能用绝对值反算（否则会在 0 与 -gap 之间自激振荡）。一次收敛，之后偏差≈0 不再写样式。
+      // 只处理紧邻的卡片：中间夹了问题卡/弹窗/其它节点时测量没有意义，
+      // 任何补偿都可能把 dock 或消息层拉塌（0.6.52 布局回归）。
+      if (!isRealComposerCard(card) || host.previousElementSibling !== card) {
+        resetFit(host);
+        return;
+      }
+      // 上次若留下超限 margin（旧版本 bug/布局突变），先清掉再量
+      if (Math.abs(px(host.style.marginTop)) > MAX_FIT_GAP ||
+          Math.abs(px(host.style.marginBottom)) > MAX_FIT_GAP) {
+        resetFit(host);
+      }
       const c = card.getBoundingClientRect();
       let h = host.getBoundingClientRect();
+      const gap0 = h.top - c.bottom;
+      // 相邻卡片的原生间距只可能是几十 px；几百 px 说明锚点被布局变化带偏，
+      // 此时负 margin 会直接压缩父容器/滚动宿主，必须放弃补偿。
+      if (!Number.isFinite(gap0) || Math.abs(gap0) > MAX_FIT_GAP) {
+        resetFit(host);
+        return;
+      }
+      // 增量累积修正：测量值本身包含上一次的 margin，必须「当前 margin - 实测偏差」，
+      // 不能用绝对值反算（否则会在 0 与 -gap 之间自激振荡）。一次收敛，之后偏差≈0 不再写样式。
       // 布局原生的上方空白 = 实测 - 我们已加的 margin。它同时是「下方最多能抵消多少」的上限：
       // 我们只撤掉自己插入带来的那一份空白，绝不吞掉应用自己的下边距/元素间距。
-      const rawTop = (h.top - c.bottom) - px(host.style.marginTop);
-      const cap = Math.max(0, rawTop);
-      const topErr = (h.top - c.bottom) - GAP_TARGET;   // 正=还太远 负=贴太近
+      const rawTop = gap0 - px(host.style.marginTop);
+      const cap = Math.max(0, Math.min(rawTop, MAX_FIT_GAP));
+      const topErr = gap0 - GAP_TARGET;   // 正=还太远 负=贴太近
       if (Math.abs(topErr) > 0.5) {
-        host.style.marginTop = (px(host.style.marginTop) - topErr) + "px";
+        const delta = topErr > 0 ? Math.min(topErr, cap) : topErr;
+        const mt = Math.max(-MAX_FIT_GAP, Math.min(MAX_FIT_GAP,
+          px(host.style.marginTop) - delta));
+        host.style.marginTop = mt + "px";
         h = host.getBoundingClientRect();               // 立即回流，取补偿后的真实位置
       }
       const nx = host.nextElementSibling;
@@ -712,9 +793,11 @@
         // 后面还有元素：负 margin 能真正把后续内容拉上来，量到它上沿即可
         const botErr = nx.getBoundingClientRect().top - h.bottom;
         if (botErr > 0.5) {
-          host.style.marginBottom = (px(host.style.marginBottom) - Math.min(botErr, cap)) + "px";
+          const mb = px(host.style.marginBottom) - Math.min(botErr, cap);
+          host.style.marginBottom = Math.max(-MAX_FIT_GAP, Math.min(MAX_FIT_GAP, mb)) + "px";
         } else if (botErr < -0.5) {
-          host.style.marginBottom = (px(host.style.marginBottom) + Math.min(-botErr, cap)) + "px";
+          const mb = px(host.style.marginBottom) + Math.min(-botErr, cap);
+          host.style.marginBottom = Math.max(-MAX_FIT_GAP, Math.min(MAX_FIT_GAP, mb)) + "px";
         }
         host.style.transform = "";
         if (diag) { diag.gapSink = 0; diag.gapNext = true; }
@@ -738,28 +821,59 @@
   // 用 marginBottom 抵到 GAP_TARGET;只撤掉自己插入的那份空白(cap),不吞应用原生间距。
   // 前面有兄弟元素时对称补偿 marginTop;上方没有「容器底边框沉入」场景,不用 translateY,
   // 避免把 sticky 输入框容器顶穿。
+  //
+  // ★ 0.6.52 回归修复：旧实现把 cap 直接取成实测间距，问题卡/弹窗把卡片推远后
+  //   cap 跟着变成几百 px，于是写出几百 px 负 marginBottom，把 sticky dock 拉塌。
+  //   现在只补偿 ≤MAX_FIT_GAP 的相邻间距；超出、非相邻、卡片身份不符一律清零。
   function fitGapAbove(host, card) {
     if (!host || !card || !host.isConnected || !card.isConnected) return;
     try {
+      // 只处理紧邻卡片；问题卡/弹窗插在中间时实测间距没有意义
+      if (!isRealComposerCard(card) || host.nextElementSibling !== card) {
+        resetFit(host);
+        if (diag) diag.fitAbove = { gap: null, mb: 0, skipped: "not-adjacent" };
+        return;
+      }
+      // 上次若留下超限 margin（旧版本 bug/布局突变），先清掉再量
+      if (Math.abs(px(host.style.marginTop)) > MAX_FIT_GAP ||
+          Math.abs(px(host.style.marginBottom)) > MAX_FIT_GAP) {
+        resetFit(host);
+      }
       const c = card.getBoundingClientRect();
       let h = host.getBoundingClientRect();
-      const rawBottom = (c.top - h.bottom) - px(host.style.marginBottom);
-      const cap = Math.max(0, rawBottom);
-      const botErr = (c.top - h.bottom) - GAP_TARGET;   // 正=离卡片还太远 负=贴太近
+      const gap0 = c.top - h.bottom;
+      // 相邻卡片的原生间距只可能是几十 px；几百 px 说明锚点被布局变化带偏，
+      // 此时任何负 margin 都会把 sticky dock 拉塌，必须直接放弃补偿。
+      if (!Number.isFinite(gap0) || Math.abs(gap0) > MAX_FIT_GAP) {
+        resetFit(host);
+        if (diag) diag.fitAbove = { gap: gap0, mb: 0, skipped: "gap" };
+        return;
+      }
+      const rawBottom = gap0 - px(host.style.marginBottom);
+      const cap = Math.max(0, Math.min(rawBottom, MAX_FIT_GAP));
+      const botErr = gap0 - GAP_TARGET;   // 正=离卡片还太远 负=贴太近
       if (Math.abs(botErr) > 0.5) {
         const delta = botErr > 0 ? Math.min(botErr, cap) : botErr;
-        host.style.marginBottom = (px(host.style.marginBottom) - delta) + "px";
+        const mb = Math.max(-MAX_FIT_GAP, Math.min(MAX_FIT_GAP,
+          px(host.style.marginBottom) - delta));
+        host.style.marginBottom = mb + "px";
         h = host.getBoundingClientRect();
       }
       const prev = host.previousElementSibling;
       if (prev) {
-        const pr = prev.getBoundingClientRect();
-        const rawTop = (h.top - pr.bottom) - px(host.style.marginTop);
-        const capTop = Math.max(0, rawTop);
-        const topErr = (h.top - pr.bottom) - GAP_TARGET;
-        if (Math.abs(topErr) > 0.5) {
-          const deltaTop = topErr > 0 ? Math.min(topErr, capTop) : topErr;
-          host.style.marginTop = (px(host.style.marginTop) - deltaTop) + "px";
+        const gapTop = h.top - prev.getBoundingClientRect().bottom;
+        if (Number.isFinite(gapTop) && Math.abs(gapTop) <= MAX_FIT_GAP) {
+          const rawTop = gapTop - px(host.style.marginTop);
+          const capTop = Math.max(0, Math.min(rawTop, MAX_FIT_GAP));
+          const topErr = gapTop - GAP_TARGET;
+          if (Math.abs(topErr) > 0.5) {
+            const deltaTop = topErr > 0 ? Math.min(topErr, capTop) : topErr;
+            const mt = Math.max(-MAX_FIT_GAP, Math.min(MAX_FIT_GAP,
+              px(host.style.marginTop) - deltaTop));
+            host.style.marginTop = mt + "px";
+          }
+        } else {
+          host.style.marginTop = "0px";
         }
         host.style.transform = "";
         if (diag) { diag.gapSink = 0; diag.gapNext = true; }
@@ -768,12 +882,16 @@
         host.style.transform = "";
         if (diag) { diag.gapSink = 0; diag.gapNext = false; }
       }
+      if (diag) diag.fitAbove = { gap: gap0, mb: px(host.style.marginBottom), skipped: null };
     } catch (err) { /* 静默 */ }
   }
   function attach(host, mode) {
     const changed = host.getAttribute("data-ztps-mode") !== mode;
-    // 快路径：宿主已在文档树中、模式未变、且处于正确的父/兄弟节点下，无需重新查找 composer，0开销返回
-    if (!changed && host.isConnected && host._target && host._target.isConnected) {
+    // 快路径：宿主已在文档树中、模式未变、目标仍是真实 composer、且处于正确的父/兄弟节点下。
+    // ★ isRealComposerCard 是 0.6.52 回归防线：React 可能原地把 composer 卡片换成问题卡，
+    //   只校验 isConnected 会让状态条继续留在问题卡上；校验失败就走下面重新解析/移除。
+    if (!changed && host.isConnected && host._target && host._target.isConnected
+        && isRealComposerCard(host._target)) {
       // 低频重量：布局(gap 变化/窗口缩放/主题切换)漂移后自动重新对齐，1s 节流
       const now = Date.now();
       if (mode === "composer-below" && host.previousElementSibling === host._target) {
@@ -787,7 +905,8 @@
     }
     // 输入框上方/下方共用 composer 卡片锚点,只是插入方向相反（beforebegin / afterend）
     const card = findComposerCard();
-    if (!card || !card.parentElement || isInsideSidePane(card)) return false;
+    if (!card || !card.parentElement || isInsideSidePane(card)
+        || !isRealComposerCard(card)) return false;
     const sibling = mode === "composer-above" ? host.nextElementSibling : host.previousElementSibling;
     if (changed || host.parentElement !== card.parentElement || sibling !== card) {
       if (mode === "composer-above") card.insertAdjacentElement("beforebegin", host);
@@ -799,6 +918,8 @@
         alignItems: "center",
         marginTop: "0", marginBottom: "0", padding: "0",
         alignSelf: "stretch",          // 与 composer 卡片同宽
+        flexShrink: "0",               // dock 高度受限时不被压扁
+        minHeight: "20px",
         pointerEvents: "auto",
       });
       // 插入完成后量一次实际空白并抵消（rAF 保证拿到最终布局）
@@ -894,7 +1015,7 @@
         if ((snap.output || 0) > agg.output) agg.output = snap.output;
         // 轮/步是会话级全历史:快照 turns=distinct turn_id、requests=completed 模型请求数。
         // ⚠️ 不得再把「streaming 轮的轮数/步数」加到快照基线上（0.6.35 及之前这么做）：
-        //   * 0.6.35 起 PostToolUse 钩子让快照在回合内也持续刷新，in-flight 轮的首个请求
+        //   * 0.6.42 起 main watcher 让快照在回合内也持续刷新，in-flight 轮的首个请求
         //     一落库就进 snap.turns/requests，再 +stream 会把它算两遍；
         //   * 终态 turnHeader 行偶发缺失时，旧轮会永远卡在 streaming——+stream 会把
         //     它当成新轮再 +1（用户实测：空闲 5 轮显示 6；回合中 2 轮 115 请求显示 3轮 215步）。
@@ -1126,14 +1247,20 @@
   let lastVisible = null;
   function prune() {
     const now = Date.now();
+    const dead = new Set();
     for (const [id, t] of turns) {
       if (lastVisible && lastVisible.has(id)) continue;
       const last = t.lastUsageAt || t.endedAt || t.startedAt || 0;
       if (now - last <= PRUNE_MS) continue;
+      dead.add(id);
       turns.delete(id);
       if (t.sourceCommandId) scidTurn.delete(t.sourceCommandId);
-      for (const [rid, tid] of rowTurn) if (tid === id) rowTurn.delete(rid);
-      for (const [rid, tid] of respTurn) if (tid === id) respTurn.delete(rid);
+    }
+    // 先收集再单遍清理：旧实现每个待删轮都完整扫一遍 rowTurn/respTurn，
+    // 多轮清理时是 O(待删轮 × 映射大小)。这里降到 O(映射大小)。
+    if (dead.size) {
+      for (const [rid, tid] of rowTurn) if (dead.has(tid)) rowTurn.delete(rid);
+      for (const [rid, tid] of respTurn) if (dead.has(tid)) respTurn.delete(rid);
     }
     for (const k of Object.keys(firstChunkByScid)) {
       if (!scidTurn.has(k) && now - (firstChunkByScid[k] || 0) > PRUNE_MS) delete firstChunkByScid[k];
@@ -1165,11 +1292,11 @@
     removeLegacyFooters();
     // 彻底移除 document.body 的 MutationObserver，杜绝长会话挂载时的底层 C++ 监听负荷。
     // 流式生成期间 100% 由 MessagePort 消息帧事件驱动实时刷新（0 延迟）；
-    // 会话常驻状态栏通过 500ms 轻量巡检维护（挂载状态下瞬时短路，零开销）。
+    // 会话常驻状态栏通过 1000ms 轻量巡检维护（挂载状态下走内容签名短路，零 DOM 写）。
     setInterval(() => {
       if (document.hidden) return;
       scheduleScan();
-    }, 500);
+    }, 1000);
     // 低频维护（5s）：清理过期轮次数据与遗留废弃节点
     setInterval(() => {
       if (document.hidden) return;
@@ -1186,6 +1313,16 @@
     } catch (err) { /* 静默 */ }
     scan();
   }
+  // 冒烟测试专用：暴露纯函数与挂载入口（只读，不改变生产行为）。
+  // tests/tps_layout_smoke.js 用它复现「问题卡/弹窗 / 超大间距」场景，
+  // 不必驱动整个事件流与渲染循环。
+  try {
+    window.__ztpsTest = {
+      findComposerInput, findComposerCard, attach, fitGap, fitGapAbove,
+      isRealComposerCard, cardOf, resetFit,
+    };
+  } catch (err) { /* 静默 */ }
+
   if (document.body) start();
   else document.addEventListener("DOMContentLoaded", start);
 

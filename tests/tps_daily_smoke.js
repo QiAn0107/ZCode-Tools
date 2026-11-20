@@ -163,12 +163,12 @@ check((src.match(/总耗 /g) || []).length >= 2, "有数据态与空态应都有
 // 有测量 helper、有目标值、上下两侧都补偿、有节流重量。
 check(/const GAP_TARGET = \d+/.test(src), "缺 GAP_TARGET，视觉间距没有目标值");
 check(/function fitGap\(host, card\)/.test(src), "缺 fitGap helper，无法按实测像素补偿间距");
-check(/px\(host\.style\.marginTop\) - topErr/.test(src),
+check(/px\(host\.style\.marginTop\) - delta/.test(src),
       "上侧必须按「当前 margin - 实测偏差」增量修正，绝对值反算会自激振荡");
 check(/px\(host\.style\.marginBottom\) - Math\.min\(botErr, cap\)/.test(src),
       "下侧补偿必须按「实测偏差」增量修正且以 cap 封顶");
-check(/const cap = Math\.max\(0, rawTop\)/.test(src),
-      "缺 cap 上限，会吞掉应用自己的下边距把其它元素往上拽");
+check(/const cap = Math\.max\(0, Math\.min\(rawTop, MAX_FIT_GAP\)\)/.test(src),
+      "缺 cap 边界：cap 必须同时受 MAX_FIT_GAP 限制，否则会吞掉超大布局间距");
 check(/Math\.abs\(topErr\) > 0\.5/.test(src) && /botErr > 0\.5/.test(src),
       "缺收敛阈值，稳定后仍会每秒写样式");
 // 末位元素：负 margin 不会让胶囊自己下移（父高 auto 时容器底同步上移），
@@ -181,7 +181,23 @@ check(/const room = bBottom - h\.bottom - GAP_TARGET/.test(src),
 check(/now - host\._fitAt > 1000/.test(src),
       "缺重量节流，布局/窗口变化后补偿不会刷新");
 check(!/parentRowGap/.test(src), "旧的 parentRowGap 猜测式补偿应已移除");
-check(/scriptVersion = "3\.30-palette-above"/.test(src), "脚本版本号未同步到 3.30-palette-above");
+check(/scriptVersion = "3\.31-above-guard"/.test(src), "脚本版本号未同步到 3.31-above-guard");
+// 0.6.52 上方挂载回归：只允许挂真实 composer dock；间距补偿必须有硬上限，
+// 且 host 与卡片必须相邻。问题卡/弹窗插在中间或间距被放大时一律清零 margin。
+check(/const MAX_FIT_GAP = \d+/.test(src), "缺 MAX_FIT_GAP 硬上限，异常大间距会写出大负 margin");
+check(/host\.nextElementSibling !== card/.test(src),
+      "fitGapAbove 缺相邻性守卫：问题卡/弹窗夹在中间时仍会按错误间距补偿");
+check(/host\.previousElementSibling !== card/.test(src),
+      "fitGap 缺相邻性守卫：卡片与 host 之间被插入其它节点时仍会按错误间距补偿");
+check(/function isRealComposerCard\(card\)/.test(src),
+      "缺 composer 真实性校验，问题卡/弹窗/消息区输入框可能被当成 composer");
+check(/isRealComposerCard\(cardOf\(el\)\)/.test(src),
+      "findComposerInput 未逐个校验候选卡片，通用 textarea 兜底仍可能误挂");
+check(/if \(!card \|\| !isRealComposerCard\(card\)\) return null/.test(src),
+      "findComposerCard 未拒绝非 composer 卡片");
+check(/card\.closest\("section\[data-turn-id\]"\)/.test(src),
+      "缺消息轮次守卫：问题卡/工具卡会被当成 composer");
+check(/flexShrink: "0"/.test(src), "host 未禁止 flex 压缩，dock 高度受限时状态条会被压扁");
 
 // ---------- ⑤ 早到 delta pending 回放 ----------
 // 首批带 input 的 delta 常早于 turnHeader/respTurn 桥接到达：必须暂存待回放，

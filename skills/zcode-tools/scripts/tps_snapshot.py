@@ -12,15 +12,16 @@ tok/s / 输出估算）仍由 zcode-tps.js 的 ServicePort 事件流承担。两
 渲染侧以 Math.max 合并，事件优先、快照补漏。0.6.42 起会话快照额外携带
 最近一次 completed 请求的权威 tok/s / 首token 毫秒（last_tps/last_ttft_ms，
 口径见 _last_request_metrics），供渲染层在事件漏采或缺值时兜底校准；
-快照重建的触发除钩子（SessionStart/Stop/PostToolUse）外，还有注入到
-main 的 watcher：fs.watch 库目录变化 → spawn 本脚本 --quiet 重算 →
-经 zcode:tps-push 主动推给渲染层。
+快照重建的主力是注入到 main 的 watcher：fs.watch 库目录变化 → spawn 本脚本
+--quiet 重算 → 经 zcode:tps-push 主动推给渲染层；SessionStart / Stop 钩子
+再补会话启动与轮末两次。PostToolUse 钩子已移除（每次工具调用起 Python 的代价
+大于收益，回合内刷新由 watcher 的 1.5s 限频 + 30s 心跳覆盖）。
 
 用法（均为只读 DB，失败静默返回非零）：
     python tps_snapshot.py                 # 全量快照 -> <v2>/ztps-snapshot.json
     python tps_snapshot.py --sid <id>      # 仅查一个会话（stdout JSON，不写文件）
     python tps_snapshot.py --check         # 只读探针：库存在/表结构/行数
-    python tps_snapshot.py --min-age 30    # 快照 30s 内已刷新过则跳过（PostToolUse 节流）
+    python tps_snapshot.py --min-age 30    # 快照 30s 内已刷新过则跳过（手动调用节流）
 """
 
 from __future__ import annotations
@@ -210,7 +211,13 @@ def today_range_ms() -> tuple[int, int]:
 
 
 def build_snapshot(con: sqlite3.Connection, sids: list[str] | None = None) -> dict:
-    """全量快照：全部有 completed 行的会话 + 今日全局。"""
+    """全量快照：全部有 completed 行的会话 + 今日全局。
+
+    保留逐会话查询：客户端 DB 有 (session_id, turn_id) 索引，每个会话的
+    SESSION_SQL/LAST_REQ_SQL 都是索引查找（实测 297 会话 ≈59ms）。曾尝试
+    单条 GROUP BY + 窗口批量查询，查询数从 594 降到 3，但两次全表窗口排序
+    反而要 ≈108ms —— 因此不采用（见 PERFORMANCE.md 的实测记录）。
+    """
     if sids is None:
         sids = [r[0] for r in con.execute(
             "select distinct session_id from model_usage where status='completed'")]
@@ -233,10 +240,8 @@ def snapshot_path() -> Path:
 def snapshot_fresh(dest: Path, min_age_s: int) -> bool:
     """快照文件存在且 mtime 距今不足 min_age_s 秒 → 视为仍新。
 
-    PostToolUse 钩子的节流快路径：长回合（agent 连续跑几百步工具调用）中途
-    Stop 钩子不会触发，快照会冻在回合开始值，「今日总耗」也就一直停在旧值
-    （用户实测：官方用量页 15.9M、状态栏 9m）。PostToolUse 每次工具调用都
-    跑本脚本，但只有快照超过 min_age 秒才真正读 DB 重写，其余情况秒退。
+    手动/兜底调用的节流快路径：只 stat 一次文件；快照仍新时连 setting.json
+    与 DB 都不碰。回合内的自动刷新由 main watcher 负责，不依赖本函数。
     """
     try:
         return (time.time() - dest.stat().st_mtime) < min_age_s
@@ -269,21 +274,22 @@ def main(argv: list[str] | None = None, quiet: bool = False) -> int:
     ap.add_argument("--quiet", action="store_true",
                     help="静默（钩子调用时用：stdout 非 JSON 会被判钩子失败）")
     ap.add_argument("--min-age", type=int, default=0, metavar="SEC",
-                    help="快照文件距今不足 SEC 秒则直接跳过（PostToolUse 节流，避免高频重读 DB）")
+                    help="快照文件距今不足 SEC 秒则直接跳过（手动调用节流，避免重复读 DB）")
     args = ap.parse_args(argv)
     quiet = quiet or args.quiet
     safe_stdio()
-    db = Path(args.db) if args.db else resolve_cli_db()
 
     def say(msg: str) -> None:
         if not quiet:
             print(msg)
 
     # 节流快路径：只 stat 一次文件，不碰 DB。--check/--sid 是显式查询，不受节流限制。
+    # 放在 resolve_cli_db() 之前：命中时连 setting.json 都不用解析。
     if (args.min_age > 0 and not args.check and not args.sid
             and snapshot_fresh(snapshot_path(), args.min_age)):
         say(f"[.] 快照仍新（<{args.min_age}s），跳过刷新")
         return 0
+    db = Path(args.db) if args.db else resolve_cli_db()
     try:
         con = connect_ro(db)
     except Exception as e:

@@ -356,6 +356,60 @@ class TestRepackMemory(TempCase):
         self.assertEqual(read_entry(self.asar, "out/renderer/index.html"), b"z" * 1000)
 
 
+class TestAsarRangedReads(TempCase):
+    """--check / asar_version 不得整包 read_bytes 再切片。
+
+    真实 app.asar 311–385MB；旧实现每个 --check 子进程瞬时占用约一个包体，
+    sync 的 4 个并发就是 1GB+。这里把 `_asar_header_raw` 打桩成抛错，确保
+    生产路径只走 `_read_asar_header` + `_asar_read_entry`。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.asar = self.tmp / "app.asar"
+        self.files = {
+            "package.json": b'{"name":"demo","version":"1.2.3"}',
+            "out/renderer/index.html": (b"<html><body>" + zp.TPS_TAG.encode() + b"</body></html>"),
+            "out/renderer/zcode-tps.js": b"// tps",
+            "out/preload/index.cjs": b"// preload",
+            "out/main/index.js": b"// main",
+            "pad.bin": b"x" * (1024 * 1024),
+        }
+        build_asar(self.asar, self.files)
+
+    def test_asar_version_uses_ranged_read(self):
+        with unittest.mock.patch.object(zp, "_asar_header_raw",
+                                        side_effect=AssertionError("整包读取")):
+            self.assertEqual(zp.asar_version(self.asar), "1.2.3")
+
+    def test_script_check_uses_ranged_read(self):
+        buf = io.StringIO()
+        with unittest.mock.patch.object(zp, "_asar_header_raw",
+                                        side_effect=AssertionError("整包读取")), \
+                contextlib.redirect_stdout(buf):
+            ok = zp._process_script_inject(
+                self.asar, True, False, None,
+                label="TPS", script_entry=zp.TPS_SCRIPT_PATH, tag=zp.TPS_TAG,
+                side_suffix=".tps-patch.json", bak_suffix=".tps.bak")
+        self.assertTrue(ok, buf.getvalue())
+        self.assertIn("已打", buf.getvalue())
+
+    def test_ipc_check_uses_ranged_read(self):
+        buf = io.StringIO()
+        with unittest.mock.patch.object(zp, "_asar_header_raw",
+                                        side_effect=AssertionError("整包读取")), \
+                contextlib.redirect_stdout(buf):
+            ok = zp._process_ipc_patch(self.asar, True, False, None, zp.PULLER_SPEC)
+        self.assertTrue(ok, buf.getvalue())
+        self.assertIn("未打", buf.getvalue())
+
+    def test_ranged_read_rejects_truncated_entry(self):
+        _header, data_start = zp._read_asar_header(self.asar)
+        with self.assertRaises(ValueError):
+            zp._asar_read_entry(self.asar, data_start,
+                                {"offset": "0", "size": "999999999"})
+
+
 class TestPrune(TempCase):
     """--prune 只清理本工具自己的产物：默认不碰当前备份与 sidecar，也绝不碰邻居文件。"""
 
@@ -764,7 +818,8 @@ class TestModuleSurface(unittest.TestCase):
 
     REQUIRED = [
         # asar 基础
-        "_read_asar_header", "_asar_header_raw", "_asar_entry_bytes", "_asar_integrity",
+        "_read_asar_header", "_asar_header_raw", "_asar_entry_bytes",
+        "_asar_read_entry", "_asar_integrity",
         "_asar_walk_entries", "_repack_asar",
         "_refresh_repack_sidecars", "_cleanup_stale_tmp",
         # 备份指纹
@@ -1096,8 +1151,24 @@ class TestZcodeRunningPosix(unittest.TestCase):
         self.assertFalse(gone)
 
 
+class TestWatchdogPollBackoff(unittest.TestCase):
+    """看护轮询必须自适应：前 2 分钟 3s，之后 10s。
+
+    固定 3s 等 24h 会 spawn 约 2.9 万次 tasklist；10s 的最坏检测延迟对
+    「用户手动重启」的感知可以忽略。
+    """
+
+    def test_poll_interval_backs_off_after_two_minutes(self):
+        import apply_after_exit as aae
+        self.assertEqual(aae._poll_interval(0), aae.POLL_SEC)
+        self.assertEqual(aae._poll_interval(119.9), aae.POLL_SEC)
+        self.assertEqual(aae._poll_interval(aae.POLL_FAST_SEC), aae.POLL_SEC_IDLE)
+        self.assertEqual(aae._poll_interval(24 * 3600), aae.POLL_SEC_IDLE)
+        self.assertGreater(aae.POLL_SEC_IDLE, aae.POLL_SEC)
+
+
 class TestApplyAfterExitPathGuard(unittest.TestCase):
-    """apply_after_exit 的看护轮询每 3s 调一次 zcode_running()（最长 24h）。
+    """apply_after_exit 的看护轮询（起步 3s、2 分钟后 10s）调 zcode_running()。
 
     曾经的写法是每次 sys.path.insert(0, HERE)——列表无界增长（24h 约 2.9 万个
     重复项）。_import_patcher 必须只在缺失时插入；同时不得破坏 import 缓存。
@@ -1267,7 +1338,7 @@ class TestTpsSnapshotBlock(unittest.TestCase):
 
     渲染层经 handler 读 Python 写的用量快照 JSON（纯 fs.readFileSync）。
     0.6.42 起块尾追加 watcher（移植自参考实现 inject-main.cjs）：fs.watch 库目录
-    → 300ms 去抖 + 1500ms 限频 + busy 单飞 + 30s stat 心跳 → spawn 只读的
+    → 300ms 去抖 + 2500ms 限频 + busy 单飞 + 30s stat 心跳 → spawn 只读的
     tps_snapshot.py --quiet 重算 → webContents.send("zcode:tps-push") 推送渲染层。
     安全边界：spawn 只允许命中「指针 python + tps_snapshot.py --quiet +
     windowsHide」这一个模式；不连 sqlite、不起 shell/同步子进程、不联网、
@@ -1305,9 +1376,10 @@ class TestTpsSnapshotBlock(unittest.TestCase):
         self.assertIn('r.join(p.scripts_dir,"tps_snapshot.py")', code)
         self.assertIn('"zcode-patches-scripts.json"', code,
                       "python/脚本路径只能来自 sync 写的指针文件")
-        # 移植自参考实现的节流常量：去抖/重试 300ms、限频 1500ms、
-        # 心跳 30s、spawn 超时杀 15s、watch 挂失重连 5s
-        for ms in ("300", "1500", "30000", "15000", "5000"):
+        # 节流常量：去抖/重试 300ms、限频 2500ms（结算层可接受 2.5s 延迟，
+        # 生成期间 spawn 从 40 次/分降到 24 次/分）、心跳 30s、spawn 超时杀 15s、
+        # watch 挂失重连 5s
+        for ms in ("300", "2500", "30000", "15000", "5000"):
             self.assertIn(ms, code)
         # 推送通道 + webContents 守卫 + 非 electron 环境整体 no-op
         self.assertIn('w.send("zcode:tps-push"', code)
@@ -2235,12 +2307,103 @@ class TestEnhancePromptScript(unittest.TestCase):
         self.assertIn("value = lastKnownModel.value", body, "读空时必须回退到粘性记忆")
 
 
+class TestTpsLayoutSmoke(unittest.TestCase):
+    """TPS 状态栏上方挂载回归（0.6.52 布局塌陷）。
+
+    用户实测：状态条移到输入框上方后，出现提问卡/弹窗时会话记录整片空白、
+    面板位置错乱。根因是 `fitGapAbove` 用实测间距给自己封顶，问题卡把卡片
+    推远后写出几百 px 负 marginBottom，把 sticky dock 拉塌；同时全局
+    textarea 兜底可能把问题卡输入框当成 composer。这里用最小 DOM 桩真跑
+    findComposerInput / findComposerCard / attach / fitGap / fitGapAbove，
+    钉死：只挂真实 composer dock、间距补偿 ≤32px、非相邻一律清零。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.node = shutil.which("node") or shutil.which("node.exe")
+        cls.smoke = _HERE / "tps_layout_smoke.js"
+        cls.script = None
+        for cand in (_HERE.parent / "scripts",
+                     _HERE.parent / "skills" / "zcode-tools" / "scripts"):
+            p = cand / "zcode-tps.js"
+            if p.is_file():
+                cls.script = p
+                break
+        if cls.script is None:
+            raise unittest.SkipTest("未找到 TPS 脚本")
+
+    def _node(self, *args):
+        return subprocess.run([self.node, *args], capture_output=True,
+                              text=True, encoding="utf-8", errors="replace")
+
+    def test_layout_smoke_passes(self):
+        if not self.node:
+            self.skipTest("本机没有 node，跳过 TPS 布局冒烟测试")
+        if not self.smoke.is_file():
+            self.skipTest("未找到 tps_layout_smoke.js")
+        r = self._node(str(self.smoke), str(self.script))
+        self.assertEqual(r.returncode, 0,
+                         f"TPS 布局冒烟失败：{(r.stdout + r.stderr)[:800]}")
+        self.assertIn("tps layout smoke OK", r.stdout)
+
+    def test_layout_guards_are_present(self):
+        src = self.script.read_text(encoding="utf-8")
+        self.assertIn("MAX_FIT_GAP", src, "缺间距补偿硬上限")
+        self.assertIn("isRealComposerCard", src, "缺 composer 真实性校验")
+        self.assertIn("host.nextElementSibling !== card", src, "上方模式缺相邻性守卫")
+        self.assertIn("host.previousElementSibling !== card", src, "下方模式缺相邻性守卫")
+        self.assertIn("section[data-turn-id]", src, "缺消息轮次守卫")
+        self.assertIn('flexShrink: "0"', src, "host 未禁止 flex 压缩")
+
+    def test_layout_smoke_without_argument_fails_helpfully(self):
+        if not self.node:
+            self.skipTest("本机没有 node，跳过 TPS 布局冒烟测试")
+        if not self.smoke.is_file():
+            self.skipTest("未找到 tps_layout_smoke.js")
+        r = self._node(str(self.smoke))
+        self.assertEqual(r.returncode, 2, "缺参数应以退出码 2 结束")
+        self.assertIn("用法", r.stderr + r.stdout)
+
+
+class TestRuntimePerfGuards(unittest.TestCase):
+    """空闲轮询降频与热点清理的静态防回归（性能改动）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        root = _HERE.parent / "skills" / "zcode-tools" / "scripts"
+        if not root.is_dir():
+            root = _HERE.parent / "scripts"
+        cls.root = root
+        if not (root / "zcode-tps.js").is_file():
+            raise unittest.SkipTest("未找到注入脚本")
+
+    def _read(self, name):
+        return (self.root / name).read_text(encoding="utf-8")
+
+    def test_enhance_poll_backs_off_to_1s_with_cache(self):
+        src = self._read("zcode-enhance-prompt.js")
+        self.assertIn("setInterval(() => { if (!document.hidden) ensureButton(); }, 1000)", src)
+        self.assertIn("function resolveDock()", src)
+        self.assertIn("function resolveMount(input, dock)", src)
+
+    def test_model_puller_poll_backs_off_to_1_5s(self):
+        src = self._read("zcode-model-puller.js")
+        self.assertIn("setInterval(checkAndInject, 1500)", src)
+        self.assertIn("_addBtnCache", src)
+
+    def test_tps_poll_is_1s_and_prune_is_linear(self):
+        src = self._read("zcode-tps.js")
+        self.assertRegex(src, r"scheduleScan\(\);\s*\}\s*,\s*1000\);")
+        self.assertIn("const dead = new Set();", src)
+        self.assertIn("dead.has(tid)", src)
+
+
 class TestTpsRoundsStepsMerge(unittest.TestCase):
     """轮/步合并公式：max(事件流实时累计, 快照结算值)，**不得**再加 streaming 轮的补偿。
 
     旧公式 snapRounds = snap.turns + streamTurns 依赖「快照只在轮末写入、流式中的轮
     一定还没落库」这一前提，两个前提都塌了：
-      * 0.6.35 起 PostToolUse 钩子让快照在回合内也刷新，in-flight 轮落库即进快照，
+      * 0.6.42 起 main watcher 让快照在回合内也刷新，in-flight 轮落库即进快照，
         再 +stream 会双重计数；
       * 终态 turnHeader 行偶发缺失时旧轮永远卡在 streaming，+stream 把它当新轮 +1
         （用户实测：空闲 5 轮显示 6轮；2 轮 ~115 请求显示 3轮 215步）。
@@ -2570,9 +2733,10 @@ class TestSyncModes(unittest.TestCase):
 class TestSyncParallelChecks(unittest.TestCase):
     """★ 0.6.41：run_sync 的全部 --check 子进程必须并行跑。
 
-    每个 --check 都要在 385MB asar 上跑 2~3s，串行 4 个 ≈10s —— 而 status 文件
-    （角标的真相源）在全部 check 完成后才写，角标就跟着多等 ~10s（用户实测
-    「角标很久才显示」的成因之一）。--check 是纯只读子进程、互相独立 → 线程池
+    ranged read 之前每个 --check 都要在 385MB asar 上跑 2~3s，串行 4 个 ≈10s ——
+    而 status 文件（角标的真相源）在全部 check 完成后才写，角标就跟着多等 ~10s
+    （用户实测「角标很久才显示」的成因之一）。现在虽已降到亚秒级，并行仍保留以
+    覆盖冷缓存/大包；--check 是纯只读子进程、互相独立 → 线程池
     并发；判定循环仍按 PATCHES 原序串行（run_patcher 保持串行）。"""
 
     def setUp(self):
@@ -4106,22 +4270,20 @@ class TestPluginHookSpec(unittest.TestCase):
         for c in cmds:
             self.assertIn("--quiet", c, "钩子调用必须 --quiet，否则 stdout 会污染钩子协议")
 
-    def test_post_tool_use_keeps_snapshot_fresh_mid_turn(self):
-        """回合中途（工具调用间隙）节流刷新快照：长回合里 Stop 一直不触发，
-        「今日总耗/会话累计」会冻在回合开始值（用户实测：官方用量页 15.9M、
-        状态栏总耗 9m，轮末快照一写才跳到 20m）。
+    def test_no_post_tool_use_hook_watcher_covers_mid_turn(self):
+        """PostToolUse 已移除：每次工具调用起一个 Python 进程的代价大于收益。
 
-        PostToolUse 每次工具调用都会跑 tps_snapshot.py，必须带 --min-age 节流，
-        否则每步工具调用都全量重读 DB（16k 行 × 几百步不可接受）。
+        回合内刷新由注入到 main 的 watcher 负责：fs.watch DB 目录 → 300ms 去抖
+        → 2.5s 限频 + 30s stat 心跳；回合结束仍有 Stop 钩子。这里同时钉住
+        「钩子不再出现」与「watcher 兜底仍在」，避免以后只删一半。
         """
-        posts = self._spec()["hooks"].get("PostToolUse")
-        self.assertTrue(posts, "缺 PostToolUse 钩子，长回合中途快照会一直冻结")
-        cmds = [h["command"] for m in posts for h in m["hooks"]]
-        self.assertTrue(any("tps_snapshot.py" in c for c in cmds),
-                        f"PostToolUse 钩子没有调用快照脚本：{cmds}")
-        for c in cmds:
-            self.assertIn("--quiet", c, "钩子调用必须 --quiet，否则 stdout 会污染钩子协议")
-            self.assertIn("--min-age", c, "PostToolUse 高频触发，必须带 --min-age 节流")
+        hooks = self._spec()["hooks"]
+        self.assertNotIn("PostToolUse", hooks,
+                         "PostToolUse 每次工具调用都要起 Python，应移除并交给 main watcher")
+        w = zp._TPS_SNAPSHOT_HANDLER
+        self.assertIn("n.watch(dbDir", w, "main watcher 必须监听 DB 目录")
+        self.assertIn("tps_snapshot.py", w, "main watcher 必须 spawn 快照脚本")
+        self.assertIn("setInterval(maybe,30000)", w, "main watcher 必须有 30s stat 心跳兜底")
 
     def test_every_hook_uses_declared_fields_only(self):
         seen = []
@@ -4171,11 +4333,9 @@ class TestPluginHookSpec(unittest.TestCase):
 class TestSnapshotMinAge(TempCase):
     """--min-age 节流快路径：快照仍新时必须**不碰 DB** 直接退出。
 
-    根因背景：快照只在 SessionStart / Stop(轮末) / 看护时刷新，长回合（一个
-    回合跑几百步工具调用）中途「今日总耗」冻在回合开始值，远低于官方用量页
-    的实时 DB 值。PostToolUse + --min-age 30 让快照在回合内保持 ≤30s 新鲜；
-    节流判断只许 stat 一次文件，绝不能为了判断新鲜度去开 DB（每次工具调用
-    都全量读 16k 行不可接受）。
+    根因背景：快照在回合内由 main watcher 持续刷新，SessionStart / Stop 再补
+    两次；--min-age 是手动/兜底调用的节流。节流判断只许 stat 一次文件，绝不能
+    为了判断新鲜度去开 DB（高频调用时全量读 16k 行不可接受）。
     """
 
     def setUp(self):

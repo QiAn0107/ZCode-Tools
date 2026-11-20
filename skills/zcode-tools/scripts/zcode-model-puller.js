@@ -1000,9 +1000,17 @@
     return null;
   }
 
+  // 缓存当前可见的「添加模型」按钮：主聊天界面等无目标视图下，空闲巡检
+  // 不再每 350ms 做一次全局 querySelectorAll；点击/按键会主动清缓存重查。
+  let _addBtnCache = null;
+
   // 注入高级质感按钮并保持与当前供应商视图强绑定自愈
   function checkAndInject() {
-    const addModelBtn = findActiveAddModelButton();
+    let addModelBtn = _addBtnCache;
+    if (!addModelBtn || !addModelBtn.isConnected || addModelBtn.offsetParent == null) {
+      addModelBtn = findActiveAddModelButton();
+      _addBtnCache = addModelBtn;
+    }
     // 当前视图若不在模型供应商详情页（例如在聊天主界面），快速短路
     if (!addModelBtn) return;
 
@@ -1116,14 +1124,17 @@
   // 监听点击与按键事件，零延迟自愈
   try {
     document.addEventListener("click", () => {
+      _addBtnCache = null;          // 导航/切供应商后强制重查
       setTimeout(checkAndInject, 50);
     }, { passive: true });
     document.addEventListener("keydown", () => {
+      _addBtnCache = null;
       setTimeout(checkAndInject, 50);
     }, { passive: true });
   } catch (_) {}
 
-  // 350ms 轮询兜底，在主聊天界面时单次属性查询瞬间短路，零开销
-  setInterval(checkAndInject, 350);
+  // 1500ms 兜底巡检：点击/按键已有 50ms 即时检查；非点击场景（程序化切页）
+  // 最坏晚 1.5s 注入，换取空闲时不再高频全局查询。
+  setInterval(checkAndInject, 1500);
   checkAndInject();
 })();

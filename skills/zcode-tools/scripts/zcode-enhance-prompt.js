@@ -45,7 +45,7 @@
   const MENU_ID = "zenhance-model-menu";
   const STYLE_ID = "zenhance-style";
   const diag = (window.__zenhanceDiag = window.__zenhanceDiag || {});
-  diag.scriptVersion = "1.9";
+  diag.scriptVersion = "2.0";
 
   const TIP_IDLE = "增强提示词（右键选择模型）";
   const TIP_BUSY = "增强中…";
@@ -419,10 +419,11 @@
     return null;
   }
 
-  function findInput() {
+  function findInput(dockArg) {
     // ① 严格模式：只在 dock 内找输入框。找不到宁可返回 null 不动，
     //    也绝不去消息区里误抓一个元素回来。
-    const dock = findDock();
+    // 调用方（ensureButton）可传入已解析的 dock，避免同一 tick 重复 findDock。
+    const dock = dockArg || findDock();
     if (dock) {
       for (const sel of COMPOSER_INPUT_SELECTORS) {
         let els = [];
@@ -808,7 +809,7 @@
         }
       }
 
-      const dock = findDock();
+      const dock = dockArg || findDock();
       let pool = [];
       if (!value && dock) pool = Array.from(dock.querySelectorAll("[data-model-current-value]"));
       if (!value && !pool.length) {
@@ -939,6 +940,30 @@
     return { host: null, where: null };
   }
 
+  // ---------- 挂载点缓存（空闲巡检快路径） ----------
+  // 正常停留时 ensureButton 每 tick 都走缓存：只做 isConnected/offsetParent/contains
+  // 校验，不再重复 findDock（全局 querySelectorAll + rect 排序）与 findMount。
+  function resolveDock() {
+    if (_dockCache && _dockCache.isConnected && _dockCache.offsetParent != null) return _dockCache;
+    _dockCache = findDock();
+    return _dockCache;
+  }
+  function resolveInput(dock) {
+    if (_inputCache && _inputCache.isConnected && _inputCache.offsetParent != null
+        && (!dock || dock.contains(_inputCache))) return _inputCache;
+    _inputCache = findInput(dock);
+    return _inputCache;
+  }
+  function resolveMount(input, dock) {
+    if (_mountCache && _mountCache.host && _mountCache.host.isConnected
+        && _mountCache.host.contains(input)
+        && btn && btn.isConnected && btn.parentElement === _mountCache.host) {
+      return _mountCache;
+    }
+    _mountCache = findMount(input, dock);
+    return _mountCache;
+  }
+
   /** 落位：prepend = 图标落在模型胶囊/发送按钮**左侧**（即既有正确位置）；
    *  append 仅用于兜底工具栏行。 */
   function place(el, host, where) {
@@ -1010,6 +1035,12 @@
   const MAX_SESSION_STATES = 50;
   let activeSessionKey = null;
 
+  // DOM 查找缓存（性能）：空闲巡检每 1000ms 一次，正常停留时直接复用已校验的
+  // dock / 输入框 / 挂载点，避免重复 querySelectorAll + getBoundingClientRect 排序。
+  // 缓存校验：节点仍连接、仍可见、且仍包含当前输入框；会话切换时主动清空。
+  let _dockCache = null, _inputCache = null, _mountCache = null;
+  function resetDomCache() { _dockCache = null; _inputCache = null; _mountCache = null; }
+
   function getSessionState(key) {
     const k = key || "sess:default";
     let s = sessionStates.get(k);
@@ -1077,6 +1108,7 @@
   function checkSessionSwitch() {
     const curKey = getActiveSessionKey();
     if (curKey !== activeSessionKey) {
+      resetDomCache();
       const prevKey = activeSessionKey;
       activeSessionKey = curKey;
       diag.currentSessionKey = curKey;
@@ -1291,9 +1323,15 @@
   function ensureButton() {
     ensureStyle();
     checkSessionSwitch();
-    const input = findInput();
-    if (!input) { if (btn) { btn.remove(); btn = null; } diag.hiddenReason = "未找到输入框"; return; }
-    try { const cur = currentModel(); if (cur.value || cur.label) diag.currentModel = cur; } catch (_) {}
+    const dock = resolveDock();
+    const input = resolveInput(dock);
+    if (!input) {
+      resetDomCache();
+      if (btn) { btn.remove(); btn = null; }
+      diag.hiddenReason = "未找到输入框";
+      return;
+    }
+    try { const cur = currentModel(dock); if (cur.value || cur.label) diag.currentModel = cur; } catch (_) {}
 
     // ★ 菜单开着时的看护：按钮在 → 跟随重定位；按钮被重渲染摘掉 → 给 4 秒宽限
     //   （菜单保持可点），宽限内回来就继续跟随，超时才收起。
@@ -1313,8 +1351,7 @@
     // ★ 挂载点 = 工具栏「右侧操作区」（与发送按钮同一组），见 findMount()。
     //   绝不再退回卡片 / dock 本体：那是输入框的祖先，往其 firstChild 插入
     //   就等于把图标钉在输入框左上角（历史 bug：输入框为空 / 会话进行中）。
-    const dock = findDock();
-    const mount = findMount(input, dock);
+    const mount = resolveMount(input, dock);
     const host = mount.host;
     if (!host) {
       // 解析不到操作区：保持现状，绝不搬到左上角。从未挂上过才允许下次重试。
@@ -1373,8 +1410,9 @@
       }, { passive: true });
     } catch (_) {}
     // 彻底移除 document.body 的 MutationObserver，杜绝长会话挂载时的底层 C++ 监听负荷。
-    // 输入框属常驻组件，500ms 巡检可确保在页面视图切换后及时挂载，且在正常停留时近乎零开销。
-    setInterval(() => { if (!document.hidden) ensureButton(); }, 500);
+    // 输入框属常驻组件，1000ms 巡检足够在视图切换后挂回；正常停留时走
+    // resolveDock/resolveInput/resolveMount 缓存，只做连接性校验，零 querySelectorAll。
+    setInterval(() => { if (!document.hidden) ensureButton(); }, 1000);
     ensureButton();
   }
 

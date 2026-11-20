@@ -39,7 +39,20 @@ WANT_FILE = HERE / "_watchdog.want"
 # sync.py 在 Windows 用这个一次性计划任务启动看护（绕开 ZCode 的 Job 对象）
 SCHTASK_NAME = "ZCodePatchApply"
 POLL_SEC = 3
+POLL_SEC_IDLE = 10
+POLL_FAST_SEC = 120
 MAX_WAIT_SEC = 24 * 3600
+
+
+def _poll_interval(waited: float) -> float:
+    """等待越久，轮询越稀：前 2 分钟 3s（正常退出很快），之后 10s。
+
+    看护最长等 24h；固定 3s 会在无人值守时反复 spawn tasklist（约 2.9 万次/天）。
+    10s 的最坏检测延迟相对于「用户手动重启」的感知可以忽略。
+    """
+    return POLL_SEC if waited < POLL_FAST_SEC else POLL_SEC_IDLE
+
+
 PYTHON = sys.executable or "python"
 #: 子进程超时（秒）。看护是**无人值守**运行的，一旦某个子进程挂死就再也没有人
 #: 会来收拾 —— 表现为「明明退出了却永远不生效」（与 7.5 节那个故障长得一样）。
@@ -683,9 +696,14 @@ def main() -> int:
 
     log(f"看护启动，等待 ZCode 退出 (PID {cur_pid})…")
     waited = 0
+    slow_noted = False
     while zcode_running():
-        time.sleep(POLL_SEC)
-        waited += POLL_SEC
+        step = _poll_interval(waited)
+        if step == POLL_SEC_IDLE and not slow_noted:
+            log("等待已超过 2 分钟，运行检测降频为 10s（减少 tasklist 调用）")
+            slow_noted = True
+        time.sleep(step)
+        waited += step
         if waited >= MAX_WAIT_SEC:
             log("等待超时（24h），放弃")
             _write_status(True, "等待超时（24h），补丁仍未写入")
